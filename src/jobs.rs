@@ -201,8 +201,11 @@ impl Worker {
             };
             return self.set_task(i, Task::Failed(why));
         };
+        // Older downloads are no longer needed; a partial one of this release
+        // is resumed, so the bytes it holds count as already found.
+        download::remove_others(&release, &self.downloads);
         if let Some(free) = download::free_space(self.downloads.parent().unwrap_or(&self.downloads)) {
-            let needed = download::space_needed(&release);
+            let needed = download::space_needed(&release) - download::partial_bytes(&release, &self.downloads);
             if free < needed {
                 return self
                     .set_task(i, Task::Failed(format!("needs {} MB free on the card", needed.div_ceil(1 << 20))));

@@ -174,6 +174,10 @@ impl App {
             self.tf2_checked = time;
             self.tf2 = games::detect_tf2();
         }
+        // The games folder's name may have characters the fonts have not loaded yet.
+        for path in [self.settings.folder.as_deref(), self.tf2.as_deref()].into_iter().flatten() {
+            text.need(&path.to_string_lossy());
+        }
         if let Some((_, until)) = &self.notice {
             if time > *until {
                 self.notice = None;
@@ -621,5 +625,7 @@ fn main() {
             break;
         }
     }
+    // Quitting stops a download in progress; the next install resumes it.
+    emulation_center::download::stop_active();
     unsafe { ffi::CloseWindow() };
 }
