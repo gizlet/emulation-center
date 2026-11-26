@@ -19,8 +19,18 @@ pub enum Button {
     R,
 }
 
-const ALL: [Button; 10] =
-    [Button::Up, Button::Down, Button::Left, Button::Right, Button::A, Button::B, Button::X, Button::Y, Button::L, Button::R];
+const ALL: [Button; 10] = [
+    Button::Up,
+    Button::Down,
+    Button::Left,
+    Button::Right,
+    Button::A,
+    Button::B,
+    Button::X,
+    Button::Y,
+    Button::L,
+    Button::R,
+];
 
 pub struct Controls {
     swap_ab: bool,
@@ -175,7 +185,8 @@ mod evdev {
             if unsafe { libc::ioctl(raw, eviocg(0x20 + EV_KEY as u64, keys.len()) as _, keys.as_mut_ptr()) } < 0 {
                 return None;
             }
-            let gamepad = (BTN_SOUTH..=BTN_THUMBR).any(|b| bit(&keys, b)) || (BTN_DPAD_UP..=BTN_DPAD_RIGHT).any(|b| bit(&keys, b));
+            let gamepad = (BTN_SOUTH..=BTN_THUMBR).any(|b| bit(&keys, b))
+                || (BTN_DPAD_UP..=BTN_DPAD_RIGHT).any(|b| bit(&keys, b));
             // Keyboards are raylib's.
             if bit(&keys, KEY_A) || !gamepad {
                 return None;

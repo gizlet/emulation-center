@@ -75,7 +75,13 @@ pub fn parse(status: u16, body: &str) -> Lookup {
                     && !p.file.contains('/')
                     && url.starts_with("http") =>
             {
-                Lookup::Ready(Release { version: body.version, file: p.file, size, sha256: sha256.to_ascii_lowercase(), url })
+                Lookup::Ready(Release {
+                    version: body.version,
+                    file: p.file,
+                    size,
+                    sha256: sha256.to_ascii_lowercase(),
+                    url,
+                })
             }
             _ => Lookup::NotReady,
         };
@@ -133,7 +139,8 @@ mod tests {
         assert_eq!(parse(404, r#"{"error":{"code":"not_found","message":"no release"}}"#), Lookup::Missing);
         let unmirrored = r#"{"version":"1","package":{"file":"a.gzl","size":null,"sha256":null,"url":null}}"#;
         assert_eq!(parse(200, unmirrored), Lookup::NotReady);
-        let escaping = format!(r#"{{"version":"1","package":{{"file":"../a.gzl","size":1,"sha256":"{SHA}","url":"https://x"}}}}"#);
+        let escaping =
+            format!(r#"{{"version":"1","package":{{"file":"../a.gzl","size":1,"sha256":"{SHA}","url":"https://x"}}}}"#);
         assert_eq!(parse(200, &escaping), Lookup::NotReady);
         assert!(matches!(parse(500, "oops"), Lookup::Error(_)));
     }

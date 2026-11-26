@@ -9,7 +9,7 @@ license = "MIT"
 runtime = 1
 icon = "store/icon.png"
 cover = "store/cover.jpg"
-screenshots = ["store/screenshots/home.png", "store/screenshots/picker.png"]
+screenshots = ["store/screenshots/home.png", "store/screenshots/picker.png", "store/screenshots/home-zh.png"]
 
 [names]
 zh-CN = "模拟器中心"

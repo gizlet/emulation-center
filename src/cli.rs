@@ -11,10 +11,7 @@ pub fn program() -> String {
 }
 
 fn run(args: &[&std::ffi::OsStr]) -> Result<String, String> {
-    let out = Command::new(program())
-        .args(args)
-        .output()
-        .map_err(|e| format!("cannot run {}: {e}", program()))?;
+    let out = Command::new(program()).args(args).output().map_err(|e| format!("cannot run {}: {e}", program()))?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }

@@ -73,21 +73,20 @@ pub fn sys_disk_of(sys: &Path, device: &str) -> Option<String> {
     path.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
-/// The TF2 card's mount point on this device, if it is mounted.
+/// The TF2 card's mount point on this device, if it is mounted. Tests point
+/// `EMULATION_CENTER_MOUNTINFO` and `EMULATION_CENTER_SYSFS` at their own
+/// mount table and sysfs to present a disk image as an MMC card.
 pub fn detect_tf2() -> Option<PathBuf> {
-    let text = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    let sys = Path::new("/sys");
-    find_tf2(&parse_mountinfo(&text), |device| sys_disk_of(sys, device)).filter(|p| p.is_dir())
+    let mountinfo = std::env::var_os("EMULATION_CENTER_MOUNTINFO").unwrap_or_else(|| "/proc/self/mountinfo".into());
+    let sys = PathBuf::from(std::env::var_os("EMULATION_CENTER_SYSFS").unwrap_or_else(|| "/sys".into()));
+    let text = std::fs::read_to_string(mountinfo).ok()?;
+    find_tf2(&parse_mountinfo(&text), |device| sys_disk_of(&sys, device)).filter(|p| p.is_dir())
 }
 
 /// The folder to open in the emulator: the one the user chose while it
 /// exists, else the TF2 card, else /home.
 pub fn games_folder(chosen: Option<&Path>, tf2: Option<&Path>) -> PathBuf {
-    chosen
-        .filter(|p| p.is_dir())
-        .or(tf2)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("/home"))
+    chosen.filter(|p| p.is_dir()).or(tf2).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/home"))
 }
 
 /// Subfolders of `dir`, without hidden ones, sorted case-insensitively.
@@ -106,7 +105,12 @@ pub fn subfolders(dir: &Path) -> Vec<String> {
 /// Files in `dir`, for showing what a folder holds before choosing it.
 pub fn file_count(dir: &Path) -> usize {
     std::fs::read_dir(dir)
-        .map(|entries| entries.flatten().filter(|e| e.path().is_file() && !e.file_name().to_string_lossy().starts_with('.')).count())
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().is_file() && !e.file_name().to_string_lossy().starts_with('.'))
+                .count()
+        })
         .unwrap_or(0)
 }
 
@@ -167,7 +171,9 @@ mod tests {
         assert_eq!(find_tf2(&elsewhere, disk_of), Some(PathBuf::from("/media/my games")));
         let tf1_only: Vec<Mount> = mounts.iter().filter(|m| !m.device.starts_with("179:3")).cloned().collect();
         assert_eq!(find_tf2(&tf1_only, disk_of), None);
-        let usb = parse_mountinfo("21 1 179:2 / / ro - squashfs /dev/root ro\n50 21 8:1 / /media/usb rw - vfat /dev/sda1 rw\n");
+        let usb = parse_mountinfo(
+            "21 1 179:2 / / ro - squashfs /dev/root ro\n50 21 8:1 / /media/usb rw - vfat /dev/sda1 rw\n",
+        );
         assert_eq!(find_tf2(&usb, disk_of), None);
     }
 

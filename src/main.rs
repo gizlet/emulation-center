@@ -12,7 +12,8 @@
 //! - `EMULATION_CENTER_WINDOW=WxH`: the desktop window size (1280x960).
 //! - `EMULATION_CENTER_CAPTURE=FILE.png`: render the screen once the Store has
 //!   answered, save it and exit; `EMULATION_CENTER_SCENE=picker` captures the
-//!   folder picker and `EMULATION_CENTER_FOCUS=N` focuses row N.
+//!   folder picker (`picker:DIR` inside DIR) and `EMULATION_CENTER_FOCUS=N`
+//!   focuses row N.
 
 mod input;
 mod text;
@@ -75,7 +76,12 @@ impl Canvas {
         Vector2 { x: self.ox + x * self.scale, y: self.oy + y * self.scale }
     }
     fn rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rectangle {
-        Rectangle { x: self.ox + x * self.scale, y: self.oy + y * self.scale, width: w * self.scale, height: h * self.scale }
+        Rectangle {
+            x: self.ox + x * self.scale,
+            y: self.oy + y * self.scale,
+            width: w * self.scale,
+            height: h * self.scale,
+        }
     }
     fn fill(&self, x: f32, y: f32, w: f32, h: f32, round: f32, color: Color) {
         let r = self.rect(x, y, w, h);
@@ -231,7 +237,8 @@ impl App {
                         }
                     } else if entry.offer().is_some() {
                         self.center.install(i);
-                    } else if matches!(entry.store, StoreState::Offline(_) | StoreState::NotReady | StoreState::Missing) {
+                    } else if matches!(entry.store, StoreState::Offline(_) | StoreState::NotReady | StoreState::Missing)
+                    {
                         self.center.refresh();
                     }
                 } else if c.pressed(Button::X) && entry.offer().is_some() {
@@ -313,8 +320,12 @@ impl App {
             (Some(v), StoreState::Ready(r)) if version::is_newer(&r.version, v) => {
                 (format!("{} · {}", fill(w.installed, &[("v", v)]), fill(w.update_to, &[("v", &r.version)])), WARM)
             }
-            (Some(v), StoreState::Ready(_)) => (format!("{} · {}", fill(w.installed, &[("v", v)]), w.up_to_date), SUCCESS),
-            (Some(v), StoreState::Checking | StoreState::Unknown) => (format!("{} · {}", fill(w.installed, &[("v", v)]), w.checking), SUCCESS),
+            (Some(v), StoreState::Ready(_)) => {
+                (format!("{} · {}", fill(w.installed, &[("v", v)]), w.up_to_date), SUCCESS)
+            }
+            (Some(v), StoreState::Checking | StoreState::Unknown) => {
+                (format!("{} · {}", fill(w.installed, &[("v", v)]), w.checking), SUCCESS)
+            }
             (Some(v), _) => (fill(w.installed, &[("v", v)]), SUCCESS),
             (None, StoreState::Ready(r)) => (format!("{} · {}", w.not_installed, r.version), DIM),
             (None, StoreState::Checking | StoreState::Unknown) => (w.checking.into(), DIM),
@@ -328,7 +339,14 @@ impl App {
         unsafe {
             ffi::ClearBackground(BG_BOTTOM);
             let full = cv.rect(0.0, 0.0, W, H);
-            ffi::DrawRectangleGradientV(full.x as i32, full.y as i32, full.width as i32, full.height as i32, BG_TOP, BG_BOTTOM);
+            ffi::DrawRectangleGradientV(
+                full.x as i32,
+                full.y as i32,
+                full.width as i32,
+                full.height as i32,
+                BG_TOP,
+                BG_BOTTOM,
+            );
         }
         match &self.screen {
             Screen::Home | Screen::Opening(_) => self.draw_home(cv, t),
@@ -462,7 +480,10 @@ impl App {
             None => w.choose,
         };
         self.hints(cv, t, &[("A", primary), ("Y", w.refresh), ("B", w.quit)]);
-        if state.busy && entry.is_some_and(|e| !e.working()) && matches!(entry.map(|e| &e.store), Some(StoreState::Checking)) {
+        if state.busy
+            && entry.is_some_and(|e| !e.working())
+            && matches!(entry.map(|e| &e.store), Some(StoreState::Checking))
+        {
             let s = w.checking;
             let sw = t.measure(Face::Body, s, 13.0);
             cv.text(t, Face::Body, s, W - 28.0 - sw, 450.0, 13.0, FAINT);
@@ -549,7 +570,8 @@ fn main() {
         ffi::SetExitKey(0);
         ffi::SetTargetFPS(60);
     }
-    let fonts = std::env::var_os("EMULATION_CENTER_ASSETS").map(PathBuf::from).unwrap_or_else(|| "assets".into()).join("fonts");
+    let fonts =
+        std::env::var_os("EMULATION_CENTER_ASSETS").map(PathBuf::from).unwrap_or_else(|| "assets".into()).join("fonts");
     let mut text = Text::load(&fonts, Canvas::now().scale, &i18n::all_text());
     let mut app = App {
         words: i18n::words(&lang),
@@ -562,8 +584,12 @@ fn main() {
         screen: Screen::Home,
         notice: None,
     };
-    if std::env::var("EMULATION_CENTER_SCENE").is_ok_and(|s| s == "picker") {
-        app.screen = Screen::Picker(app.open_picker(None));
+    match std::env::var("EMULATION_CENTER_SCENE").as_deref() {
+        Ok("picker") => app.screen = Screen::Picker(app.open_picker(None)),
+        Ok(scene) if scene.starts_with("picker:") => {
+            app.screen = Screen::Picker(app.open_picker(Some(PathBuf::from(&scene["picker:".len()..]))));
+        }
+        _ => {}
     }
     let mut controls = Controls::new();
     let mut frames = 0u32;

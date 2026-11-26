@@ -6,10 +6,11 @@
 //!    and updates.
 //! 3. Tries PPSSPP, whose download does not match the Store's checksum, and
 //!    checks that nothing is installed.
-//! 4. Chooses the games folder `FLOW_GAMES`, as the folder picker does, and
-//!    opens RetroArch with it.
+//! 4. Finds the TF2 card where the test mounted it and opens RetroArch there.
 //!
-//! Run again after the emulator exits, it quits, as pressing B does.
+//! Run again after the emulator exits, it chooses the folder `FLOW_GAMES` on
+//! the card, as the folder picker does, and opens RetroArch with it. The
+//! third time, it quits, as pressing B does.
 
 use emulation_center::catalog::EMULATORS;
 use emulation_center::jobs::{Center, Shared, StoreState, Task};
@@ -37,10 +38,28 @@ fn step(n: u32, what: &str) {
 
 fn main() {
     let save = save_dir();
-    let done = save.join("flow-done");
-    if done.exists() {
-        println!("flow: quitting the center");
-        return;
+    let runs = save.join("flow-runs");
+    let run = std::fs::read_to_string(&runs).ok().and_then(|n| n.trim().parse::<u32>().ok()).unwrap_or(0) + 1;
+    std::fs::create_dir_all(&save).unwrap();
+    std::fs::write(&runs, run.to_string()).unwrap();
+    let tf2 = games::detect_tf2();
+    let expected_tf2 = PathBuf::from(std::env::var("FLOW_TF2").expect("FLOW_TF2"));
+    assert_eq!(tf2.as_deref(), Some(expected_tf2.as_path()), "the TF2 card was not found");
+    match run {
+        1 => {}
+        2 => {
+            let chosen = PathBuf::from(std::env::var("FLOW_GAMES").expect("FLOW_GAMES"));
+            Settings { folder: Some(chosen.clone()) }.store(&save).unwrap();
+            let folder = games::games_folder(Settings::load(&save).folder.as_deref(), tf2.as_deref());
+            assert_eq!(folder, chosen);
+            step(5, &format!("chose {} in the folder picker; opening RetroArch there", folder.display()));
+            write_open_request(&save, EMULATORS[0].id, &folder).unwrap();
+            return;
+        }
+        _ => {
+            println!("flow: quitting the center");
+            return;
+        }
     }
     let center = Center::start(store::api(), save.join("downloads"));
     let retroarch = 0;
@@ -80,11 +99,8 @@ fn main() {
     assert_eq!(s.entries[ppsspp].installed, None);
     assert!(!cli::installed().unwrap().contains_key("io.gizlet.ppsspp"));
 
-    let chosen = PathBuf::from(std::env::var("FLOW_GAMES").expect("FLOW_GAMES"));
-    Settings { folder: Some(chosen.clone()) }.store(&save).unwrap();
-    let folder = games::games_folder(Settings::load(&save).folder.as_deref(), games::detect_tf2().as_deref());
-    assert_eq!(folder, chosen);
-    step(4, &format!("opening RetroArch on {}", folder.display()));
+    let folder = games::games_folder(Settings::load(&save).folder.as_deref(), tf2.as_deref());
+    assert_eq!(folder, expected_tf2);
+    step(4, &format!("found the TF2 card at {}; opening RetroArch there", folder.display()));
     write_open_request(&save, EMULATORS[retroarch].id, &folder).unwrap();
-    std::fs::write(done, "").unwrap();
 }

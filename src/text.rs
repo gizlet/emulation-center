@@ -64,7 +64,14 @@ impl Text {
             title,
             body,
             bold,
-            fallback: Font { baseSize: 0, glyphCount: 0, glyphPadding: 0, texture: unsafe { std::mem::zeroed() }, recs: std::ptr::null_mut(), glyphs: std::ptr::null_mut() },
+            fallback: Font {
+                baseSize: 0,
+                glyphCount: 0,
+                glyphPadding: 0,
+                texture: unsafe { std::mem::zeroed() },
+                recs: std::ptr::null_mut(),
+                glyphs: std::ptr::null_mut(),
+            },
             fallback_path: path("DroidSansFallbackFull.ttf"),
             fallback_chars: BTreeSet::new(),
             scale,
@@ -126,10 +133,12 @@ impl Text {
 
     /// Width of `s` at `size` logical units, in logical units.
     pub fn measure(&self, face: Face, s: &str, size: f32) -> f32 {
-        s.chars().map(|c| {
-            let (font, cp) = self.glyph(face, c);
-            Self::advance(font, cp, size)
-        }).sum()
+        s.chars()
+            .map(|c| {
+                let (font, cp) = self.glyph(face, c);
+                Self::advance(font, cp, size)
+            })
+            .sum()
     }
 
     /// Draws `s` with its top-left corner at the screen position `at`, `size`

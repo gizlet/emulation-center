@@ -80,7 +80,10 @@ impl Center {
     /// at once. Packages are downloaded into `downloads`.
     pub fn start(api: String, downloads: PathBuf) -> Center {
         let shared = Arc::new(Mutex::new(Shared {
-            entries: EMULATORS.iter().map(|_| Entry { installed: None, store: StoreState::Unknown, task: Task::Idle }).collect(),
+            entries: EMULATORS
+                .iter()
+                .map(|_| Entry { installed: None, store: StoreState::Unknown, task: Task::Idle })
+                .collect(),
             target: None,
             error: None,
             busy: true,
@@ -201,15 +204,19 @@ impl Worker {
         if let Some(free) = download::free_space(self.downloads.parent().unwrap_or(&self.downloads)) {
             let needed = download::space_needed(&release);
             if free < needed {
-                return self.set_task(i, Task::Failed(format!("needs {} MB free on the card", needed.div_ceil(1 << 20))));
+                return self
+                    .set_task(i, Task::Failed(format!("needs {} MB free on the card", needed.div_ceil(1 << 20))));
             }
         }
         self.progress.done.store(0, std::sync::atomic::Ordering::Relaxed);
         let stage = |s: Stage| {
-            self.set_task(i, match s {
-                Stage::Downloading => Task::Downloading,
-                Stage::Verifying => Task::Verifying,
-            })
+            self.set_task(
+                i,
+                match s {
+                    Stage::Downloading => Task::Downloading,
+                    Stage::Verifying => Task::Verifying,
+                },
+            )
         };
         let file = match download::fetch(&release, &self.downloads, &self.progress, &stage) {
             Ok(file) => file,
