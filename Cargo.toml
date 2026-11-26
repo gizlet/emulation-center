@@ -1,0 +1,38 @@
+[package]
+name = "emulation-center"
+description = "Emulation Center for Gizlet OS: install, update and open RetroArch and PPSSPP."
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.88"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "emulation-center"
+path = "src/main.rs"
+required-features = ["ui"]
+
+[features]
+default = ["ui"]
+# The handheld UI, drawn with raylib. Leave it out (--no-default-features)
+# to build and test the rest without raylib.
+ui = ["dep:raylib-sys"]
+# Gizlet OS: link Gizlet runtime 1's libraylib.so.600 (DRM, OpenGL ES)
+# instead of letting raylib-sys build a desktop raylib. See build.rs.
+gizlet-os = ["ui", "raylib-sys/nobuild"]
+
+[dependencies]
+raylib-sys = { version = "6.0", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+strip = true

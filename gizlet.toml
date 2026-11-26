@@ -1,0 +1,52 @@
+id = "io.gizlet.emulation-center"
+name = "Emulation Center"
+version = "0.1.0"
+category = "app"
+description = "Install and update RetroArch and PPSSPP, then open them on the games already on your TF2 card."
+tags = ["emulator", "retro", "utilities", "gamepad"]
+color = "#1D2B3A"
+license = "MIT"
+runtime = 1
+icon = "store/icon.png"
+cover = "store/cover.jpg"
+screenshots = ["store/screenshots/home.png", "store/screenshots/picker.png", "store/screenshots/home-zh.png"]
+
+[names]
+zh-CN = "模拟器中心"
+
+[descriptions]
+zh-CN = "安装和更新 RetroArch 与 PPSSPP，然后用它们打开 TF2 卡上你已有的游戏。"
+
+[about]
+en = "store/about.en.md"
+zh-CN = "store/about.zh-CN.md"
+
+[[controls]]
+button = "dpad"
+action = "Choose an emulator or the games folder"
+actions = { zh-CN = "选择模拟器或游戏文件夹" }
+
+[[controls]]
+button = "a"
+action = "Open, install or choose"
+actions = { zh-CN = "打开、安装或选择" }
+
+[[controls]]
+button = "x"
+action = "Update the emulator; use this folder"
+actions = { zh-CN = "更新模拟器；使用此文件夹" }
+
+[[controls]]
+button = "y"
+action = "Check the Store again"
+actions = { zh-CN = "重新查询商店" }
+
+[[controls]]
+button = "b"
+action = "Back, or quit"
+actions = { zh-CN = "返回或退出" }
+
+[[packages]]
+target = "aarch64-unknown-linux-gnu"
+tier = "lite"
+entry = "bin/emulation-center"
