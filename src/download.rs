@@ -79,9 +79,14 @@ pub fn space_needed(release: &Release) -> u64 {
     release.size.saturating_mul(2) + (64 << 20)
 }
 
-/// The partial download of `release` already in `dir`, which a retry resumes.
+/// The bytes of `release` already downloaded in `dir`: a finished package,
+/// or the partial one a retry resumes.
 pub fn partial_bytes(release: &Release, dir: &Path) -> u64 {
-    std::fs::metadata(dir.join(format!("{}.part", release.file))).map(|m| m.len().min(release.size)).unwrap_or(0)
+    let size = |path: PathBuf| std::fs::metadata(path).map(|m| m.len()).ok();
+    match size(dir.join(&release.file)) {
+        Some(n) if n == release.size => n,
+        _ => size(dir.join(format!("{}.part", release.file))).unwrap_or(0).min(release.size),
+    }
 }
 
 /// Removes downloads in `dir` other than `release`'s.
@@ -108,6 +113,15 @@ pub fn fetch(release: &Release, dir: &Path, progress: &Progress, stage: &dyn Fn(
     let part = dir.join(format!("{}.part", release.file));
     remove_others(release, dir);
     progress.total.store(release.size, Ordering::Relaxed);
+    // A finished download left by an earlier run is used if it checks out.
+    if dest.exists() {
+        stage(Stage::Verifying);
+        let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+        if size == release.size && sha256_file(&dest, Some(progress)).ok().as_deref() == Some(release.sha256.as_str()) {
+            return Ok(dest);
+        }
+        let _ = std::fs::remove_file(&dest);
+    }
     let have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
     if have > release.size {
         let _ = std::fs::remove_file(&part);
@@ -152,4 +166,32 @@ pub fn fetch(release: &Release, dir: &Path, progress: &Progress, stage: &dyn Fn(
     }
     std::fs::rename(&part, &dest).map_err(|e| e.to_string())?;
     Ok(dest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reuses_a_finished_download_and_counts_it() {
+        let dir = std::env::temp_dir().join(format!("emulation-center-download-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let data = b"package bytes";
+        let file = dir.join("io.gizlet.test-1.0-aarch64-unknown-linux-gnu-lite.gzl");
+        std::fs::write(&file, data).unwrap();
+        std::fs::write(dir.join("old.gzl.part"), b"left over").unwrap();
+        let sha256 = sha256_file(&file, None).unwrap();
+        let release = Release {
+            version: "1.0".into(),
+            file: "io.gizlet.test-1.0-aarch64-unknown-linux-gnu-lite.gzl".into(),
+            size: data.len() as u64,
+            sha256,
+            url: "http://127.0.0.1:9/never-fetched.gzl".into(),
+        };
+        assert_eq!(partial_bytes(&release, &dir), data.len() as u64);
+        let path = fetch(&release, &dir, &Progress::default(), &|_| {}).unwrap();
+        assert_eq!(path, file);
+        assert!(!dir.join("old.gzl.part").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
