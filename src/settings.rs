@@ -15,7 +15,7 @@ impl Settings {
             .lines()
             .filter_map(|line| line.split_once('='))
             .find(|(key, _)| key.trim() == "folder")
-            .map(|(_, value)| PathBuf::from(value.trim()))
+            .map(|(_, value)| PathBuf::from(value.strip_suffix('\r').unwrap_or(value)))
             .filter(|p| p.is_absolute());
         Settings { folder }
     }
@@ -40,7 +40,7 @@ mod tests {
     fn keeps_the_chosen_folder() {
         let save = std::env::temp_dir().join(format!("emulation-center-settings-{}", std::process::id()));
         assert_eq!(Settings::load(&save), Settings::default());
-        let chosen = Settings { folder: Some("/media/tf2/psp games".into()) };
+        let chosen = Settings { folder: Some("/media/tf2/psp games ".into()) };
         chosen.store(&save).unwrap();
         assert_eq!(Settings::load(&save), chosen);
         Settings::default().store(&save).unwrap();

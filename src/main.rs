@@ -630,7 +630,8 @@ fn main() {
             break;
         }
     }
-    // Quitting stops a download in progress; the next install resumes it.
-    emulation_center::download::stop_active();
+    // Quitting stops a download in progress (the next install resumes it) and
+    // lets an install that has started finish.
+    app.center.shutdown();
     unsafe { ffi::CloseWindow() };
 }

@@ -54,7 +54,7 @@ while :; do
     ui
     status=$?
     [ -s "$request" ] || exit "$status"
-    { read -r id && read -r games; } < "$request" || exit 1
+    { IFS= read -r id && IFS= read -r games; } < "$request" || exit 1
     rm -f "$request"
     echo "Emulation Center: opening $id with $games"
     setsid "$gizlet" run "$id" --games "$games" &

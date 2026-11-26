@@ -89,7 +89,8 @@ pub fn games_folder(chosen: Option<&Path>, tf2: Option<&Path>) -> PathBuf {
     chosen.filter(|p| p.is_dir()).or(tf2).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/home"))
 }
 
-/// Subfolders of `dir`, without hidden ones, sorted case-insensitively.
+/// Subfolders of `dir`, without hidden ones, sorted case-insensitively. Names
+/// with line breaks are left out: the hand-off to an emulator is line-based.
 pub fn subfolders(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut names: Vec<String> = entries
@@ -97,6 +98,7 @@ pub fn subfolders(dir: &Path) -> Vec<String> {
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| !n.starts_with('.') && n != "System Volume Information" && n != "lost+found")
+        .filter(|n| !n.contains(['\n', '\r']))
         .collect();
     names.sort_by_key(|n| n.to_lowercase());
     names

@@ -8,8 +8,10 @@ use crate::download::{self, Progress, Stage};
 use crate::store::{self, Lookup, Release};
 use crate::version::is_newer;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StoreState {
@@ -72,6 +74,7 @@ enum Command {
 pub struct Center {
     shared: Arc<Mutex<Shared>>,
     pub progress: Arc<Progress>,
+    quitting: Arc<AtomicBool>,
     tx: Sender<Command>,
 }
 
@@ -89,8 +92,10 @@ impl Center {
             busy: true,
         }));
         let progress = Arc::new(Progress::default());
+        let quitting = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
-        let worker = Worker { shared: shared.clone(), progress: progress.clone(), api, downloads };
+        let worker =
+            Worker { shared: shared.clone(), progress: progress.clone(), quitting: quitting.clone(), api, downloads };
         std::thread::spawn(move || {
             for command in rx {
                 worker.shared.lock().unwrap().busy = true;
@@ -101,7 +106,7 @@ impl Center {
                 worker.shared.lock().unwrap().busy = false;
             }
         });
-        let center = Center { shared, progress, tx };
+        let center = Center { shared, progress, quitting, tx };
         center.refresh();
         center
     }
@@ -126,11 +131,23 @@ impl Center {
     pub fn snapshot(&self) -> Shared {
         self.shared.lock().unwrap().clone()
     }
+
+    /// Before the center exits: no new install starts, a download stops
+    /// (it resumes next time), and an install already running finishes.
+    pub fn shutdown(&self) {
+        self.quitting.store(true, Ordering::SeqCst);
+        download::stop_active();
+        let deadline = Instant::now() + Duration::from_secs(300);
+        while Instant::now() < deadline && self.snapshot().entries.iter().any(|e| e.task == Task::Installing) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 
 struct Worker {
     shared: Arc<Mutex<Shared>>,
     progress: Arc<Progress>,
+    quitting: Arc<AtomicBool>,
     api: String,
     downloads: PathBuf,
 }
@@ -225,7 +242,16 @@ impl Worker {
             Ok(file) => file,
             Err(e) => return self.set_task(i, Task::Failed(e)),
         };
-        self.set_task(i, Task::Installing);
+        {
+            // Checked under the lock the UI reads, so a quit either sees
+            // Installing and waits for it, or stops it from starting.
+            let mut shared = self.shared.lock().unwrap();
+            if self.quitting.load(Ordering::SeqCst) {
+                shared.entries[i].task = Task::Failed("stopped".into());
+                return;
+            }
+            shared.entries[i].task = Task::Installing;
+        }
         let result = cli::install(&file);
         let _ = std::fs::remove_file(&file);
         self.read_installed();
