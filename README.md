@@ -32,6 +32,7 @@ The center only reads the user's card. The emulators keep their saves and settin
 | `src/catalog.rs`, `src/i18n.rs`, `src/version.rs` | The two emulators, English and Simplified Chinese, the Store's version order |
 | `app/` | The package's entry: a static launcher (the Store requires an ELF entry) and the script it runs |
 | `tests/`, `examples/flow.rs` | The end-to-end test |
+| `examples/install.rs` | Installs or updates one emulator from the Store as the center does, without a display |
 
 ## Run on a computer
 
