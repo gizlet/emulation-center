@@ -33,13 +33,14 @@ ui() {
 }
 
 session=
-# Ends what runs in the emulator's session: SIGTERM, then SIGKILL after
-# three seconds, as `gizlet run` does.
+# Ends what runs in the emulator's session: SIGTERM, then SIGKILL after one
+# and a half seconds, well before the outer `gizlet run` kills this script
+# after its three.
 end_session() {
     [ -n "$session" ] || return 0
     pkill -TERM -s "$session" 2>/dev/null || :
     tries=0
-    while pgrep -s "$session" >/dev/null 2>&1 && [ "$tries" -lt 30 ]; do
+    while pgrep -s "$session" >/dev/null 2>&1 && [ "$tries" -lt 15 ]; do
         sleep 0.1
         tries=$((tries + 1))
     done

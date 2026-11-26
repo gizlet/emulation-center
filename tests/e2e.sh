@@ -47,7 +47,9 @@ emulator() {
 # A test emulator: records how it was opened and what it finds in the games folder.
 log=$GIZLET_SAVE_DIR/opened.log
 if [ -e "$GIZLET_SAVE_DIR/hang" ]; then
+    # A stuck emulator: it ignores SIGTERM.
     echo running >> "$log"
+    trap '' TERM
     exec sleep 3141
 fi
 echo "$GIZLET_APP_ID $(cat "$GIZLET_APP_DIR/manifest.json" | grep '"version"')" >> "$log"
@@ -113,7 +115,8 @@ ls "$GIZLET_PREFIX/saves/io.gizlet.emulation-center/downloads"
 [ -z "$(ls "$GIZLET_PREFIX/saves/io.gizlet.emulation-center/downloads" | grep -v '\.part$')" ]
 
 # Holding FN ends the app on the screen: `gizlet run` sends SIGTERM to the
-# center's process group. An emulator the center opened must end with it.
+# center's process group, and SIGKILL three seconds later. An emulator the
+# center opened must end with it, even one that ignores SIGTERM.
 saves=$GIZLET_PREFIX/saves
 touch "$saves/io.gizlet.retroarch/hang"
 cat > "$work/open-once" <<EOF
@@ -135,8 +138,11 @@ until pgrep -x -f 'sleep 3141' >/dev/null; do
 done
 python3 -c 'import os, signal, sys; os.killpg(int(sys.argv[1]), signal.SIGTERM)' \
     "$(cat "$saves/io.gizlet.emulation-center/center-group")"
+stopped=$(date +%s%N)
 wait "$center_run" || :
-sleep 0.5
+elapsed=$(( ($(date +%s%N) - stopped) / 1000000 ))
+echo "e2e: the center and its emulator ended ${elapsed} ms after SIGTERM"
+[ "$elapsed" -lt 2900 ] || { echo 'the center took longer than gizlet run allows' >&2; exit 1; }
 if pgrep -x -f 'sleep 3141' >/dev/null; then
     echo 'the emulator outlived the center' >&2
     exit 1

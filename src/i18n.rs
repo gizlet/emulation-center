@@ -41,6 +41,7 @@ pub struct Words {
     pub opening: &'static str,
     pub open_note: &'static str,
     pub cannot_read_apps: &'static str,
+    pub wait_install: &'static str,
 }
 
 pub const EN: Words = Words {
@@ -83,6 +84,7 @@ pub const EN: Words = Words {
     opening: "Opening {name}…",
     open_note: "Your games open from the emulator's own file browser.",
     cannot_read_apps: "Cannot read installed apps: {e}",
+    wait_install: "Wait for the install to finish",
 };
 
 pub const ZH: Words = Words {
@@ -125,6 +127,7 @@ pub const ZH: Words = Words {
     opening: "正在打开 {name}…",
     open_note: "游戏在模拟器自己的文件浏览器中打开。",
     cannot_read_apps: "无法读取已安装的应用：{e}",
+    wait_install: "请等待安装完成",
 };
 
 pub fn words(lang: &str) -> &'static Words {
@@ -184,6 +187,7 @@ pub fn all_text() -> String {
             w.opening,
             w.open_note,
             w.cannot_read_apps,
+            w.wait_install,
         ] {
             text.push_str(s);
         }

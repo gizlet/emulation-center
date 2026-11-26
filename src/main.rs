@@ -214,7 +214,12 @@ impl App {
                     self.center.refresh();
                 }
                 if c.pressed(Button::B) {
-                    return false;
+                    // An install in progress finishes first; a download is resumed next time.
+                    if state.entries.iter().any(|e| e.task == Task::Installing) {
+                        self.notice(self.words.wait_install.to_string(), time);
+                    } else {
+                        return false;
+                    }
                 }
                 if self.focus == GAMES_ROW {
                     if c.pressed(Button::A) {
