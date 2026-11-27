@@ -5,6 +5,8 @@
 //! when several mounts qualify. The center only reads these folders.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 
 pub const TF2_MOUNT: &str = "/media/tf2";
 
@@ -94,13 +96,26 @@ fn listed(name: &str) -> bool {
     !name.starts_with('.') && name != "System Volume Information" && name != "lost+found"
 }
 
+/// Whether an entry is a folder and whether it is a file. The type comes
+/// from the directory listing; a symbolic link counts as what it points to.
+fn kind(entry: &std::fs::DirEntry) -> (bool, bool) {
+    match entry.file_type() {
+        Ok(t) if t.is_symlink() => {
+            let path = entry.path();
+            (path.is_dir(), path.is_file())
+        }
+        Ok(t) => (t.is_dir(), t.is_file()),
+        Err(_) => (false, false),
+    }
+}
+
 /// Subfolders of `dir`, without hidden ones, sorted case-insensitively. Names
 /// with line breaks are left out: the hand-off to an emulator is line-based.
 pub fn subfolders(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut names: Vec<String> = entries
         .flatten()
-        .filter(|e| e.path().is_dir())
+        .filter(|e| kind(e).0)
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| listed(n) && !n.contains(['\n', '\r']))
         .collect();
@@ -117,25 +132,18 @@ pub struct Contents {
     pub folders: usize,
 }
 
-/// The visible files and subfolders of `dir`. Entry types come from the
-/// directory listing, so a folder of many games costs no more than reading it.
+/// The visible files and subfolders of `dir`. A folder of many games costs
+/// no more than reading its listing.
 pub fn contents(dir: &Path) -> Contents {
     let mut contents = Contents::default();
     let Ok(entries) = std::fs::read_dir(dir) else { return contents };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let Ok(kind) = entry.file_type() else { continue };
         if !listed(&name) {
             continue;
         }
-        // A symbolic link counts as what it points to.
-        let (is_dir, is_file) = if kind.is_symlink() {
-            let path = entry.path();
-            (path.is_dir(), path.is_file())
-        } else {
-            (kind.is_dir(), kind.is_file())
-        };
+        let (is_dir, is_file) = kind(&entry);
         if is_dir && !name.contains(['\n', '\r']) {
             contents.folders += 1;
         } else if is_file {
@@ -143,6 +151,51 @@ pub fn contents(dir: &Path) -> Contents {
         }
     }
     contents
+}
+
+/// Reads what folders hold on a worker thread, so that a large folder on a
+/// slow card never holds up the screen. Requests belong to a generation;
+/// starting a new one drops the requests of the last that are still queued.
+pub struct Scanner {
+    requests: mpsc::Sender<(u64, PathBuf)>,
+    results: mpsc::Receiver<(u64, PathBuf, Contents)>,
+    generation: Arc<AtomicU64>,
+}
+
+impl Scanner {
+    pub fn start() -> Scanner {
+        let (requests, queue) = mpsc::channel::<(u64, PathBuf)>();
+        let (done, results) = mpsc::channel();
+        let generation = Arc::new(AtomicU64::new(0));
+        let current = Arc::clone(&generation);
+        std::thread::spawn(move || {
+            for (asked, path) in queue {
+                if asked != current.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let found = contents(&path);
+                if done.send((asked, path, found)).is_err() {
+                    break;
+                }
+            }
+        });
+        Scanner { requests, results, generation }
+    }
+
+    /// Starts a new generation, dropping the requests not yet read.
+    pub fn restart(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn request(&self, path: PathBuf) {
+        let _ = self.requests.send((self.generation.load(Ordering::Relaxed), path));
+    }
+
+    /// The folders read since the last call, in this generation.
+    pub fn results(&self) -> Vec<(PathBuf, Contents)> {
+        let current = self.generation.load(Ordering::Relaxed);
+        self.results.try_iter().filter(|(asked, ..)| *asked == current).map(|(_, path, c)| (path, c)).collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -229,6 +282,24 @@ mod tests {
         assert_eq!(contents(&dir), Contents { files: 1, folders: 3 });
         assert_eq!(contents(&dir.join("gba")), Contents::default());
         assert_eq!(contents(&dir.join("missing")), Contents::default());
+
+        let scanner = Scanner::start();
+        scanner.request(dir.clone());
+        scanner.request(dir.join("gba"));
+        let mut found = Vec::new();
+        for _ in 0..200 {
+            found.extend(scanner.results());
+            if found.len() == 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(found, [(dir.clone(), Contents { files: 1, folders: 3 }), (dir.join("gba"), Contents::default())]);
+        // A new generation drops what the last one asked for.
+        scanner.request(dir.clone());
+        scanner.restart();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(scanner.results(), []);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

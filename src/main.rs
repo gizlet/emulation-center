@@ -25,7 +25,7 @@ use canvas::{
     SUCCESS, SURFACE, SURFACE_HI, TEXT, W, WARM, WHITE,
 };
 use emulation_center::catalog::{Emulator, Icon, EMULATORS};
-use emulation_center::games::{self, Contents, PlaceKind};
+use emulation_center::games::{self, Contents, PlaceKind, Scanner};
 use emulation_center::i18n::{self, fill, Words};
 use emulation_center::jobs::{Center, Entry, StoreState, Task};
 use emulation_center::settings::Settings;
@@ -112,12 +112,13 @@ struct Picker {
     /// None: the list of places.
     dir: Option<PathBuf>,
     rows: Vec<Row>,
-    /// What each row's folder holds, read as the row comes into view.
+    /// What each row's folder holds, read in the background as the row comes into view.
     contents: Vec<Option<Contents>>,
+    asked: Vec<bool>,
     focus: usize,
     /// The first row shown.
     first: usize,
-    here: Contents,
+    here: Option<Contents>,
 }
 
 impl Picker {
@@ -149,6 +150,7 @@ enum Screen {
 struct App {
     words: &'static Words,
     center: Center,
+    scanner: Scanner,
     save: PathBuf,
     settings: Settings,
     tf2: Option<PathBuf>,
@@ -182,20 +184,21 @@ impl App {
         }
     }
 
-    /// The picker in `dir`, focused on `from` (the folder just left) when it is listed.
+    /// The picker in `dir`, focused on `from` (the folder just left) when it is
+    /// listed. Counting what folders hold starts over.
     fn open_picker(&self, dir: Option<PathBuf>, from: Option<&Path>) -> Picker {
+        self.scanner.restart();
         let mut rows = Vec::new();
-        let mut here = Contents::default();
         match &dir {
             None => rows.extend(games::places(self.tf2.as_deref()).into_iter().map(|(k, p)| Row::Place(k, p))),
             Some(d) => {
                 rows.push(Row::Up);
                 rows.extend(games::subfolders(d).into_iter().map(Row::Folder));
-                here = games::contents(d);
+                self.scanner.request(d.clone());
             }
         }
-        let contents = vec![None; rows.len()];
-        let mut picker = Picker { dir, rows, contents, focus: 0, first: 0, here };
+        let (contents, asked) = (vec![None; rows.len()], vec![false; rows.len()]);
+        let mut picker = Picker { dir, rows, contents, asked, focus: 0, first: 0, here: None };
         if let Some(from) = from {
             if let Some(i) = picker.rows.iter().position(|row| picker.path(row).as_deref() == Some(from)) {
                 picker.focus = i;
@@ -240,16 +243,18 @@ impl App {
                 if let Some(d) = &p.dir {
                     text.need(&d.to_string_lossy());
                 }
-                // Read what the rows in view hold, a few a frame.
-                let mut budget = 2;
-                for i in p.first..(p.first + ROWS).min(p.rows.len()) {
-                    if budget == 0 {
-                        break;
+                for (path, found) in self.scanner.results() {
+                    if p.dir.as_ref() == Some(&path) {
+                        p.here = Some(found);
+                    } else if let Some(i) = p.rows.iter().position(|row| p.path(row).as_ref() == Some(&path)) {
+                        p.contents[i] = Some(found);
                     }
-                    if p.contents[i].is_none() && matches!(p.rows[i], Row::Folder(_)) {
+                }
+                for i in p.first..(p.first + ROWS).min(p.rows.len()) {
+                    if !p.asked[i] && matches!(p.rows[i], Row::Folder(_)) {
                         if let Some(path) = p.path(&p.rows[i]) {
-                            p.contents[i] = Some(games::contents(&path));
-                            budget -= 1;
+                            self.scanner.request(path);
+                            p.asked[i] = true;
                         }
                     }
                 }
@@ -704,8 +709,8 @@ impl App {
 
         let open = if p.dir.is_none() { w.choose } else { w.open };
         let hints_left = self.footer(cv, t, &[("B", w.back), ("X", w.use_this), ("A", open)]);
-        if p.dir.is_some() {
-            let s = count(p.here.files, w.one_file_here, w.files_here);
+        if let Some(here) = p.here {
+            let s = count(here.files, w.one_file_here, w.files_here);
             let s = t.fit(Face::Body, &s, 13.0, hints_left - MARGIN - 24.0);
             cv.text_mid(t, Face::Body, &s, MARGIN + 4.0, (FOOTER + H) / 2.0, 13.0, FAINT);
         }
@@ -814,6 +819,7 @@ fn main() {
     let mut app = App {
         words: i18n::words(&lang),
         center: Center::start(store::api(), save.join("downloads")),
+        scanner: Scanner::start(),
         settings: Settings::load(&save),
         save,
         tf2: games::detect_tf2(),
