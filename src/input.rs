@@ -103,6 +103,11 @@ impl Controls {
     pub fn pressed(&self, b: Button) -> bool {
         self.pressed[index(b)]
     }
+
+    /// Whether any button was pressed this frame.
+    pub fn any(&self) -> bool {
+        self.pressed.iter().any(|&p| p)
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "gizlet-os"))]

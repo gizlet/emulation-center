@@ -5,6 +5,8 @@
 //! when several mounts qualify. The center only reads these folders.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 
 pub const TF2_MOUNT: &str = "/media/tf2";
 
@@ -89,31 +91,111 @@ pub fn games_folder(chosen: Option<&Path>, tf2: Option<&Path>) -> PathBuf {
     chosen.filter(|p| p.is_dir()).or(tf2).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/home"))
 }
 
+/// Whether the picker shows an entry: not hidden, and not a filesystem's own folder.
+fn listed(name: &str) -> bool {
+    !name.starts_with('.') && name != "System Volume Information" && name != "lost+found"
+}
+
+/// Whether an entry is a folder and whether it is a file. The type comes
+/// from the directory listing; a symbolic link counts as what it points to.
+fn kind(entry: &std::fs::DirEntry) -> (bool, bool) {
+    match entry.file_type() {
+        Ok(t) if t.is_symlink() => {
+            let path = entry.path();
+            (path.is_dir(), path.is_file())
+        }
+        Ok(t) => (t.is_dir(), t.is_file()),
+        Err(_) => (false, false),
+    }
+}
+
 /// Subfolders of `dir`, without hidden ones, sorted case-insensitively. Names
 /// with line breaks are left out: the hand-off to an emulator is line-based.
 pub fn subfolders(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut names: Vec<String> = entries
         .flatten()
-        .filter(|e| e.path().is_dir())
+        .filter(|e| kind(e).0)
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.') && n != "System Volume Information" && n != "lost+found")
-        .filter(|n| !n.contains(['\n', '\r']))
+        .filter(|n| listed(n) && !n.contains(['\n', '\r']))
         .collect();
     names.sort_by_key(|n| n.to_lowercase());
     names
 }
 
-/// Files in `dir`, for showing what a folder holds before choosing it.
-pub fn file_count(dir: &Path) -> usize {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.path().is_file() && !e.file_name().to_string_lossy().starts_with('.'))
-                .count()
-        })
-        .unwrap_or(0)
+/// What a folder holds, for showing it before choosing it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Contents {
+    /// Visible files.
+    pub files: usize,
+    /// The subfolders the picker lists.
+    pub folders: usize,
+}
+
+/// The visible files and subfolders of `dir`. A folder of many games costs
+/// no more than reading its listing.
+pub fn contents(dir: &Path) -> Contents {
+    let mut contents = Contents::default();
+    let Ok(entries) = std::fs::read_dir(dir) else { return contents };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !listed(&name) {
+            continue;
+        }
+        let (is_dir, is_file) = kind(&entry);
+        if is_dir && !name.contains(['\n', '\r']) {
+            contents.folders += 1;
+        } else if is_file {
+            contents.files += 1;
+        }
+    }
+    contents
+}
+
+/// Reads what folders hold on a worker thread, so that a large folder on a
+/// slow card never holds up the screen. Requests belong to a generation;
+/// starting a new one drops the requests of the last that are still queued.
+pub struct Scanner {
+    requests: mpsc::Sender<(u64, PathBuf)>,
+    results: mpsc::Receiver<(u64, PathBuf, Contents)>,
+    generation: Arc<AtomicU64>,
+}
+
+impl Scanner {
+    pub fn start() -> Scanner {
+        let (requests, queue) = mpsc::channel::<(u64, PathBuf)>();
+        let (done, results) = mpsc::channel();
+        let generation = Arc::new(AtomicU64::new(0));
+        let current = Arc::clone(&generation);
+        std::thread::spawn(move || {
+            for (asked, path) in queue {
+                if asked != current.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let found = contents(&path);
+                if done.send((asked, path, found)).is_err() {
+                    break;
+                }
+            }
+        });
+        Scanner { requests, results, generation }
+    }
+
+    /// Starts a new generation, dropping the requests not yet read.
+    pub fn restart(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn request(&self, path: PathBuf) {
+        let _ = self.requests.send((self.generation.load(Ordering::Relaxed), path));
+    }
+
+    /// The folders read since the last call, in this generation.
+    pub fn results(&self) -> Vec<(PathBuf, Contents)> {
+        let current = self.generation.load(Ordering::Relaxed);
+        self.results.try_iter().filter(|(asked, ..)| *asked == current).map(|(_, path, c)| (path, c)).collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -191,12 +273,33 @@ mod tests {
     #[test]
     fn lists_visible_subfolders_in_order() {
         let dir = std::env::temp_dir().join(format!("emulation-center-test-{}", std::process::id()));
-        for name in ["psp", "NES", ".hidden", "gba"] {
+        for name in ["psp", "NES", ".hidden", "gba", "lost+found"] {
             std::fs::create_dir_all(dir.join(name)).unwrap();
         }
         std::fs::write(dir.join("readme.txt"), "x").unwrap();
+        std::fs::write(dir.join(".DS_Store"), "x").unwrap();
         assert_eq!(subfolders(&dir), ["gba", "NES", "psp"]);
-        assert_eq!(file_count(&dir), 1);
+        assert_eq!(contents(&dir), Contents { files: 1, folders: 3 });
+        assert_eq!(contents(&dir.join("gba")), Contents::default());
+        assert_eq!(contents(&dir.join("missing")), Contents::default());
+
+        let scanner = Scanner::start();
+        scanner.request(dir.clone());
+        scanner.request(dir.join("gba"));
+        let mut found = Vec::new();
+        for _ in 0..200 {
+            found.extend(scanner.results());
+            if found.len() == 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(found, [(dir.clone(), Contents { files: 1, folders: 3 }), (dir.join("gba"), Contents::default())]);
+        // A new generation drops what the last one asked for.
+        scanner.request(dir.clone());
+        scanner.restart();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(scanner.results(), []);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

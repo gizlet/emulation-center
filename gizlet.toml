@@ -1,6 +1,6 @@
 id = "io.gizlet.emulation-center"
 name = "Emulation Center"
-version = "0.1.0"
+version = "0.2.0"
 category = "app"
 description = "Install and update RetroArch and PPSSPP, then open them on the games already on your TF2 card."
 tags = ["emulator", "retro", "utilities", "gamepad"]

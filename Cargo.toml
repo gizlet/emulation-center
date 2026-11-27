@@ -1,7 +1,7 @@
 [package]
 name = "emulation-center"
 description = "Emulation Center for Gizlet OS: install, update and open RetroArch and PPSSPP."
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.88"
