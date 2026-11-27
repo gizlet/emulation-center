@@ -89,6 +89,11 @@ pub fn games_folder(chosen: Option<&Path>, tf2: Option<&Path>) -> PathBuf {
     chosen.filter(|p| p.is_dir()).or(tf2).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/home"))
 }
 
+/// Whether the picker shows an entry: not hidden, and not a filesystem's own folder.
+fn listed(name: &str) -> bool {
+    !name.starts_with('.') && name != "System Volume Information" && name != "lost+found"
+}
+
 /// Subfolders of `dir`, without hidden ones, sorted case-insensitively. Names
 /// with line breaks are left out: the hand-off to an emulator is line-based.
 pub fn subfolders(dir: &Path) -> Vec<String> {
@@ -97,23 +102,47 @@ pub fn subfolders(dir: &Path) -> Vec<String> {
         .flatten()
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.') && n != "System Volume Information" && n != "lost+found")
-        .filter(|n| !n.contains(['\n', '\r']))
+        .filter(|n| listed(n) && !n.contains(['\n', '\r']))
         .collect();
     names.sort_by_key(|n| n.to_lowercase());
     names
 }
 
-/// Files in `dir`, for showing what a folder holds before choosing it.
-pub fn file_count(dir: &Path) -> usize {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.path().is_file() && !e.file_name().to_string_lossy().starts_with('.'))
-                .count()
-        })
-        .unwrap_or(0)
+/// What a folder holds, for showing it before choosing it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Contents {
+    /// Visible files.
+    pub files: usize,
+    /// The subfolders the picker lists.
+    pub folders: usize,
+}
+
+/// The visible files and subfolders of `dir`. Entry types come from the
+/// directory listing, so a folder of many games costs no more than reading it.
+pub fn contents(dir: &Path) -> Contents {
+    let mut contents = Contents::default();
+    let Ok(entries) = std::fs::read_dir(dir) else { return contents };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Ok(kind) = entry.file_type() else { continue };
+        if !listed(&name) {
+            continue;
+        }
+        // A symbolic link counts as what it points to.
+        let (is_dir, is_file) = if kind.is_symlink() {
+            let path = entry.path();
+            (path.is_dir(), path.is_file())
+        } else {
+            (kind.is_dir(), kind.is_file())
+        };
+        if is_dir && !name.contains(['\n', '\r']) {
+            contents.folders += 1;
+        } else if is_file {
+            contents.files += 1;
+        }
+    }
+    contents
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -191,12 +220,15 @@ mod tests {
     #[test]
     fn lists_visible_subfolders_in_order() {
         let dir = std::env::temp_dir().join(format!("emulation-center-test-{}", std::process::id()));
-        for name in ["psp", "NES", ".hidden", "gba"] {
+        for name in ["psp", "NES", ".hidden", "gba", "lost+found"] {
             std::fs::create_dir_all(dir.join(name)).unwrap();
         }
         std::fs::write(dir.join("readme.txt"), "x").unwrap();
+        std::fs::write(dir.join(".DS_Store"), "x").unwrap();
         assert_eq!(subfolders(&dir), ["gba", "NES", "psp"]);
-        assert_eq!(file_count(&dir), 1);
+        assert_eq!(contents(&dir), Contents { files: 1, folders: 3 });
+        assert_eq!(contents(&dir.join("gba")), Contents::default());
+        assert_eq!(contents(&dir.join("missing")), Contents::default());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -15,86 +15,90 @@
 //!   folder picker (`picker:DIR` inside DIR) and `EMULATION_CENTER_FOCUS=N`
 //!   focuses row N.
 
+mod canvas;
+mod icons;
 mod input;
 mod text;
 
-use emulation_center::catalog::EMULATORS;
-use emulation_center::games::{self, PlaceKind};
+use canvas::{
+    alpha, mix, rgb, Canvas, ACCENT, ACCENT_HI, BG_BOTTOM, BG_TOP, BLACK, DANGER, DIM, FAINT, H, LINE, ON_ACCENT,
+    SUCCESS, SURFACE, SURFACE_HI, TEXT, W, WARM, WHITE,
+};
+use emulation_center::catalog::{Emulator, Icon, EMULATORS};
+use emulation_center::games::{self, Contents, PlaceKind};
 use emulation_center::i18n::{self, fill, Words};
 use emulation_center::jobs::{Center, Entry, StoreState, Task};
 use emulation_center::settings::Settings;
 use emulation_center::{save_dir, store, version, write_open_request};
 use input::{Button, Controls};
-use raylib_sys::{self as ffi, Color, ConfigFlags as F, Rectangle, Vector2};
+use raylib_sys::{self as ffi, Color, ConfigFlags as F};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use text::{Face, Text};
 
 /// Without a window system: raylib's DRM platform on the whole panel.
 const KMS: bool = cfg!(feature = "gizlet-os");
-const W: f32 = 640.0;
-const H: f32 = 480.0;
 
-const fn rgb(hex: u32) -> Color {
-    Color { r: (hex >> 16) as u8, g: (hex >> 8) as u8, b: hex as u8, a: 255 }
+const MARGIN: f32 = 24.0;
+/// The home screen's cards.
+const CARD_TOP: f32 = 80.0;
+const CARD_H: f32 = 98.0;
+const CARD_GAP: f32 = 10.0;
+const CARD_ROUND: f32 = 16.0;
+/// The divider above the button hints.
+const FOOTER: f32 = 434.0;
+/// The folder picker's list.
+const LIST_TOP: f32 = 82.0;
+const ROW_H: f32 = 42.0;
+const ROWS: usize = 8;
+
+const FOLDER: Color = rgb(0xe8a23a);
+const GAMES_TILE: Color = rgb(0xd98324);
+
+fn ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
 }
 
-fn alpha(c: Color, a: f32) -> Color {
-    Color { a: (a * 255.0) as u8, ..c }
+fn place_color(kind: &PlaceKind) -> Color {
+    match kind {
+        PlaceKind::Tf2 => rgb(0x1f9d6e),
+        PlaceKind::Home => rgb(0x6a55d8),
+        PlaceKind::Media => rgb(0x2f74c0),
+        PlaceKind::Mnt => rgb(0x5a6475),
+    }
 }
 
-// The launcher's dark theme.
-const BG_TOP: Color = rgb(0x1d2027);
-const BG_BOTTOM: Color = rgb(0x121418);
-const SURFACE: Color = rgb(0x262a32);
-const SURFACE_HI: Color = rgb(0x323743);
-const LINE: Color = rgb(0x3a3f4b);
-const TEXT: Color = rgb(0xf3f5f8);
-const DIM: Color = rgb(0xa4abb8);
-const FAINT: Color = rgb(0x6c7380);
-const ACCENT: Color = rgb(0x34b6ff);
-const ON_ACCENT: Color = rgb(0x06121c);
-const DANGER: Color = rgb(0xff5d63);
-const SUCCESS: Color = rgb(0x3ddc97);
-const WARM: Color = rgb(0xff9a3d);
-
-/// Maps the 640×480 logical screen onto the window, letterboxed.
-#[derive(Clone, Copy)]
-struct Canvas {
-    scale: f32,
-    ox: f32,
-    oy: f32,
+fn place_icon(cv: &Canvas, kind: &PlaceKind, cx: f32, cy: f32, s: f32, c: Color, hole: Color) {
+    match kind {
+        PlaceKind::Tf2 => icons::card(cv, cx, cy, s, c, hole),
+        PlaceKind::Home => icons::house(cv, cx, cy, s, c, hole),
+        PlaceKind::Media => icons::drive(cv, cx, cy, s, c, hole),
+        PlaceKind::Mnt => icons::mounts(cv, cx, cy, s, c, hole),
+    }
 }
 
-impl Canvas {
-    fn now() -> Canvas {
-        let (sw, sh) = unsafe { (ffi::GetScreenWidth() as f32, ffi::GetScreenHeight() as f32) };
-        let scale = (sw / W).min(sh / H);
-        Canvas { scale, ox: (sw - W * scale) / 2.0, oy: (sh - H * scale) / 2.0 }
+fn emulator_color(e: &Emulator) -> Color {
+    let [r, g, b] = e.color;
+    Color { r, g, b, a: 255 }
+}
+
+/// An emulator's tile with its icon.
+fn emulator_tile(cv: &Canvas, e: &Emulator, x: f32, y: f32, size: f32) {
+    let color = emulator_color(e);
+    icons::tile(cv, x, y, size, size * 0.27, color);
+    let (cx, cy, s) = (x + size / 2.0, y + size / 2.0, size * 0.66);
+    match e.icon {
+        Icon::Gamepad => icons::gamepad(cv, cx, cy, s, WHITE, color),
+        Icon::Handheld => icons::handheld(cv, cx, cy, s, WHITE, color),
     }
-    fn v(&self, x: f32, y: f32) -> Vector2 {
-        Vector2 { x: self.ox + x * self.scale, y: self.oy + y * self.scale }
-    }
-    fn rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rectangle {
-        Rectangle {
-            x: self.ox + x * self.scale,
-            y: self.oy + y * self.scale,
-            width: w * self.scale,
-            height: h * self.scale,
-        }
-    }
-    fn fill(&self, x: f32, y: f32, w: f32, h: f32, round: f32, color: Color) {
-        let r = self.rect(x, y, w, h);
-        let roundness = if round <= 0.0 { 0.0 } else { (2.0 * round / w.min(h)).min(1.0) };
-        unsafe { ffi::DrawRectangleRounded(r, roundness, 8, color) };
-    }
-    fn outline(&self, x: f32, y: f32, w: f32, h: f32, round: f32, thick: f32, color: Color) {
-        let r = self.rect(x, y, w, h);
-        let roundness = (2.0 * round / w.min(h)).min(1.0);
-        unsafe { ffi::DrawRectangleRoundedLinesEx(r, roundness, 8, thick * self.scale, color) };
-    }
-    fn text(&self, t: &Text, face: Face, s: &str, x: f32, y: f32, size: f32, color: Color) {
-        t.draw(face, s, self.v(x, y), size * self.scale, color);
+}
+
+fn count(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        one.to_string()
+    } else {
+        fill(many, &[("n", &n.to_string())])
     }
 }
 
@@ -108,14 +112,38 @@ struct Picker {
     /// None: the list of places.
     dir: Option<PathBuf>,
     rows: Vec<Row>,
+    /// What each row's folder holds, read as the row comes into view.
+    contents: Vec<Option<Contents>>,
     focus: usize,
-    files: usize,
+    /// The first row shown.
+    first: usize,
+    here: Contents,
+}
+
+impl Picker {
+    fn path(&self, row: &Row) -> Option<PathBuf> {
+        match (row, &self.dir) {
+            (Row::Place(_, path), _) => Some(path.clone()),
+            (Row::Folder(name), Some(d)) => Some(d.join(name)),
+            _ => None,
+        }
+    }
+
+    /// Scrolls just enough to show the focused row.
+    fn reveal(&mut self) {
+        if self.focus < self.first {
+            self.first = self.focus;
+        } else if self.focus >= self.first + ROWS {
+            self.first = self.focus + 1 - ROWS;
+        }
+    }
 }
 
 enum Screen {
     Home,
     Picker(Picker),
-    Opening(String),
+    /// Opening the emulator at this index.
+    Opening(usize),
 }
 
 struct App {
@@ -128,6 +156,10 @@ struct App {
     focus: usize,
     screen: Screen,
     notice: Option<(String, f64)>,
+    swap_ab: bool,
+    /// The time of this frame, and of the last button press.
+    now: f64,
+    moved: f64,
 }
 
 const GAMES_ROW: usize = EMULATORS.len();
@@ -150,18 +182,27 @@ impl App {
         }
     }
 
-    fn open_picker(&self, dir: Option<PathBuf>) -> Picker {
+    /// The picker in `dir`, focused on `from` (the folder just left) when it is listed.
+    fn open_picker(&self, dir: Option<PathBuf>, from: Option<&Path>) -> Picker {
         let mut rows = Vec::new();
-        let mut files = 0;
+        let mut here = Contents::default();
         match &dir {
             None => rows.extend(games::places(self.tf2.as_deref()).into_iter().map(|(k, p)| Row::Place(k, p))),
             Some(d) => {
                 rows.push(Row::Up);
                 rows.extend(games::subfolders(d).into_iter().map(Row::Folder));
-                files = games::file_count(d);
+                here = games::contents(d);
             }
         }
-        Picker { dir, rows, focus: 0, files }
+        let contents = vec![None; rows.len()];
+        let mut picker = Picker { dir, rows, contents, focus: 0, first: 0, here };
+        if let Some(from) = from {
+            if let Some(i) = picker.rows.iter().position(|row| picker.path(row).as_deref() == Some(from)) {
+                picker.focus = i;
+                picker.reveal();
+            }
+        }
+        picker
     }
 
     /// Whether `dir` is one of the places the picker starts from.
@@ -170,6 +211,10 @@ impl App {
     }
 
     fn update(&mut self, c: &Controls, text: &mut Text, time: f64) -> bool {
+        self.now = time;
+        if c.any() {
+            self.moved = time;
+        }
         if time - self.tf2_checked > 2.0 {
             self.tf2_checked = time;
             self.tf2 = games::detect_tf2();
@@ -186,7 +231,7 @@ impl App {
         if matches!(self.screen, Screen::Picker(_)) {
             let Screen::Picker(p) = std::mem::replace(&mut self.screen, Screen::Home) else { unreachable!() };
             self.screen = self.update_picker(p, c, time);
-            if let Screen::Picker(p) = &self.screen {
+            if let Screen::Picker(p) = &mut self.screen {
                 for row in &p.rows {
                     if let Row::Folder(name) = row {
                         text.need(name);
@@ -195,6 +240,19 @@ impl App {
                 if let Some(d) = &p.dir {
                     text.need(&d.to_string_lossy());
                 }
+                // Read what the rows in view hold, a few a frame.
+                let mut budget = 2;
+                for i in p.first..(p.first + ROWS).min(p.rows.len()) {
+                    if budget == 0 {
+                        break;
+                    }
+                    if p.contents[i].is_none() && matches!(p.rows[i], Row::Folder(_)) {
+                        if let Some(path) = p.path(&p.rows[i]) {
+                            p.contents[i] = Some(games::contents(&path));
+                            budget -= 1;
+                        }
+                    }
+                }
             }
             return true;
         }
@@ -202,58 +260,53 @@ impl App {
         if matches!(self.screen, Screen::Opening(_)) {
             return false;
         }
-        {
-            {
-                if c.pressed(Button::Up) {
-                    self.focus = self.focus.saturating_sub(1);
-                }
-                if c.pressed(Button::Down) {
-                    self.focus = (self.focus + 1).min(GAMES_ROW);
-                }
-                if c.pressed(Button::Y) {
-                    self.center.refresh();
-                }
-                if c.pressed(Button::B) {
-                    // An install in progress finishes first; a download is resumed next time.
-                    if state.entries.iter().any(|e| e.task == Task::Installing) {
-                        self.notice(self.words.wait_install.to_string(), time);
-                    } else {
-                        return false;
-                    }
-                }
-                if self.focus == GAMES_ROW {
-                    if c.pressed(Button::A) {
-                        let picker = self.open_picker(None);
-                        self.screen = Screen::Picker(picker);
-                    } else if c.pressed(Button::X) && self.settings.folder.is_some() && self.tf2.is_some() {
-                        self.settings.folder = None;
-                        let _ = self.settings.store(&self.save);
-                    }
-                    return true;
-                }
-                let i = self.focus;
-                let entry = &state.entries[i];
-                if c.pressed(Button::A) {
-                    if entry.installed.is_some() && !entry.working() {
-                        if state.entries.iter().any(Entry::working) {
-                            self.notice(fill(self.words.waiting, &[]), time);
-                        } else {
-                            let games = self.games_folder();
-                            match write_open_request(&self.save, EMULATORS[i].id, &games) {
-                                Ok(()) => self.screen = Screen::Opening(EMULATORS[i].name.to_string()),
-                                Err(e) => self.notice(fill(self.words.failed, &[("e", &e.to_string())]), time),
-                            }
-                        }
-                    } else if entry.offer().is_some() {
-                        self.center.install(i);
-                    } else if matches!(entry.store, StoreState::Offline(_) | StoreState::NotReady | StoreState::Missing)
-                    {
-                        self.center.refresh();
-                    }
-                } else if c.pressed(Button::X) && entry.offer().is_some() {
-                    self.center.install(i);
-                }
+        if c.pressed(Button::Up) {
+            self.focus = self.focus.saturating_sub(1);
+        }
+        if c.pressed(Button::Down) {
+            self.focus = (self.focus + 1).min(GAMES_ROW);
+        }
+        if c.pressed(Button::Y) {
+            self.center.refresh();
+        }
+        if c.pressed(Button::B) {
+            // An install in progress finishes first; a download is resumed next time.
+            if state.entries.iter().any(|e| e.task == Task::Installing) {
+                self.notice(self.words.wait_install.to_string(), time);
+            } else {
+                return false;
             }
+        }
+        if self.focus == GAMES_ROW {
+            if c.pressed(Button::A) {
+                let picker = self.open_picker(None, None);
+                self.screen = Screen::Picker(picker);
+            } else if c.pressed(Button::X) && self.settings.folder.is_some() && self.tf2.is_some() {
+                self.settings.folder = None;
+                let _ = self.settings.store(&self.save);
+            }
+            return true;
+        }
+        let i = self.focus;
+        let entry = &state.entries[i];
+        if c.pressed(Button::A) {
+            if entry.installed.is_some() && !entry.working() {
+                if state.entries.iter().any(Entry::working) {
+                    self.notice(fill(self.words.waiting, &[]), time);
+                } else {
+                    let games = self.games_folder();
+                    match write_open_request(&self.save, EMULATORS[i].id, &games) {
+                        Ok(()) => self.screen = Screen::Opening(i),
+                        Err(e) => self.notice(fill(self.words.failed, &[("e", &e.to_string())]), time),
+                    }
+                }
+            } else if entry.offer().is_some() {
+                self.center.install(i);
+            } else if matches!(entry.store, StoreState::Offline(_) | StoreState::NotReady | StoreState::Missing) {
+                self.center.refresh();
+            }
+        } else if c.pressed(Button::X) && entry.offer().is_some() {
+            self.center.install(i);
         }
         true
     }
@@ -276,25 +329,23 @@ impl App {
             p.focus = (p.focus + 1) % n;
         }
         if n > 0 && c.pressed(Button::L) {
-            p.focus = p.focus.saturating_sub(8);
+            p.focus = p.focus.saturating_sub(ROWS);
         }
         if n > 0 && c.pressed(Button::R) {
-            p.focus = (p.focus + 8).min(n - 1);
+            p.focus = (p.focus + ROWS).min(n - 1);
         }
+        p.reveal();
         if c.pressed(Button::B) {
             return match &p.dir {
                 None => Screen::Home,
-                Some(d) => Screen::Picker(self.open_picker(self.up_from(d))),
+                Some(d) => Screen::Picker(self.open_picker(self.up_from(d), Some(d))),
             };
         }
         if c.pressed(Button::A) && n > 0 {
-            let next = match (&p.rows[p.focus], &p.dir) {
-                (Row::Place(_, path), _) => Some(path.clone()),
-                (Row::Up, Some(d)) => self.up_from(d),
-                (Row::Folder(name), Some(d)) => Some(d.join(name)),
-                _ => None,
+            return match (&p.rows[p.focus], &p.dir) {
+                (Row::Up, Some(d)) => Screen::Picker(self.open_picker(self.up_from(d), Some(d))),
+                (row, _) => Screen::Picker(self.open_picker(p.path(row), None)),
             };
-            return Screen::Picker(self.open_picker(next));
         }
         if c.pressed(Button::X) {
             let chosen = match (&p.dir, p.rows.get(p.focus)) {
@@ -344,103 +395,157 @@ impl App {
         }
     }
 
-    fn draw(&self, cv: Canvas, t: &Text) {
-        unsafe {
-            ffi::ClearBackground(BG_BOTTOM);
-            let full = cv.rect(0.0, 0.0, W, H);
-            ffi::DrawRectangleGradientV(
-                full.x as i32,
-                full.y as i32,
-                full.width as i32,
-                full.height as i32,
-                BG_TOP,
-                BG_BOTTOM,
-            );
-        }
-        match &self.screen {
-            Screen::Home | Screen::Opening(_) => self.draw_home(cv, t),
-            Screen::Picker(p) => self.draw_picker(cv, t, p),
-        }
-        if let Screen::Opening(name) = &self.screen {
-            cv.fill(0.0, 0.0, W, H, 0.0, alpha(BG_BOTTOM, 0.85));
-            let s = fill(self.words.opening, &[("name", name)]);
-            let w = t.measure(Face::Bold, &s, 22.0);
-            cv.text(t, Face::Bold, &s, (W - w) / 2.0, H / 2.0 - 14.0, 22.0, TEXT);
-        }
-        if let Some((s, _)) = &self.notice {
-            let w = t.measure(Face::Body, s, 15.0).min(W - 60.0) + 32.0;
-            cv.fill((W - w) / 2.0, 392.0, w, 34.0, 17.0, SURFACE_HI);
-            let s = t.fit(Face::Body, s, 15.0, W - 60.0);
-            cv.text(t, Face::Body, &s, (W - w) / 2.0 + 16.0, 401.0, 15.0, TEXT);
+    /// What a folder holds, in a few words.
+    fn describe(&self, c: Contents) -> String {
+        let w = self.words;
+        let folders = count(c.folders, w.one_folder, w.folders);
+        let files = count(c.files, w.one_file, w.files);
+        match (c.folders, c.files) {
+            (0, 0) => w.empty.to_string(),
+            (0, _) => files,
+            (_, 0) => folders,
+            _ => format!("{folders} · {files}"),
         }
     }
 
-    fn chip(&self, cv: Canvas, t: &Text, x_right: f32, y: f32, button: &str, label: &str, primary: bool) -> f32 {
-        let lw = t.measure(Face::Bold, label, 14.0);
-        let w = lw + 40.0;
+    /// The controller button for a hint: with A and B swapped, the confirm
+    /// and back buttons are the other physical buttons.
+    fn glyph<'a>(&self, button: &'a str) -> &'a str {
+        match (self.swap_ab, button) {
+            (true, "A") => "B",
+            (true, "B") => "A",
+            _ => button,
+        }
+    }
+
+    /// The focus colour, pulsing for a few seconds after a button press.
+    fn focus_color(&self) -> Color {
+        let since = (self.now - self.moved) as f32;
+        let pulse = (3.0 - since).clamp(0.0, 1.0);
+        let wave = (self.now * 3.2).sin() as f32 / 2.0;
+        mix(ACCENT, ACCENT_HI, (0.5 + wave * pulse) * 0.6)
+    }
+
+    /// The focus ring around a rounded rectangle, with a short pop when focus moves.
+    fn focus_ring(&self, cv: &Canvas, x: f32, y: f32, w: f32, h: f32, round: f32) {
+        let pop = 1.0 - ease_out(((self.now - self.moved) / 0.22) as f32);
+        let (gap, thick) = (3.0 + pop * 3.0, 3.0);
+        let c = self.focus_color();
+        let o = gap + thick;
+        let (x, y, w, h, r) = (x - o, y - o, w + 2.0 * o, h + 2.0 * o, round + o);
+        cv.outline(x - 3.0, y - 3.0, w + 6.0, h + 6.0, r + 3.0, 4.0, alpha(c, 0.18));
+        cv.outline(x, y, w, h, r, thick, c);
+    }
+
+    fn card(&self, cv: &Canvas, y: f32, focused: bool) {
+        let (x, w) = (MARGIN, W - 2.0 * MARGIN);
+        if focused {
+            cv.fill(x, y, w, CARD_H, CARD_ROUND, SURFACE_HI);
+            self.focus_ring(cv, x, y, w, CARD_H, CARD_ROUND);
+        } else {
+            cv.fill(x, y, w, CARD_H, CARD_ROUND, alpha(SURFACE, 0.92));
+            cv.outline(x, y, w, CARD_H, CARD_ROUND, 1.0, alpha(WHITE, 0.04));
+        }
+    }
+
+    /// An action button inside a card, ending at `x_right`. Returns the next one's right edge.
+    #[allow(clippy::too_many_arguments)]
+    fn chip(&self, cv: &Canvas, t: &Text, x_right: f32, cy: f32, button: &str, label: &str, primary: bool) -> f32 {
+        let h = 30.0;
+        let w = 34.0 + t.measure(Face::Bold, label, 14.0) + 14.0;
         let x = x_right - w;
-        cv.fill(x, y, w, 26.0, 13.0, if primary { ACCENT } else { SURFACE_HI });
-        let fg = if primary { ON_ACCENT } else { TEXT };
-        cv.fill(x + 5.0, y + 4.0, 18.0, 18.0, 9.0, alpha(fg, 0.18));
-        let bw = t.measure(Face::Bold, button, 12.0);
-        cv.text(t, Face::Bold, button, x + 14.0 - bw / 2.0, y + 5.0, 12.0, fg);
-        cv.text(t, Face::Bold, label, x + 28.0, y + 5.0, 14.0, fg);
+        let (bg, fg, letter) = if primary { (ACCENT, ON_ACCENT, ACCENT) } else { (alpha(TEXT, 0.1), TEXT, SURFACE_HI) };
+        cv.fill(x, cy - h / 2.0, w, h, h / 2.0, bg);
+        icons::button(cv, t, self.glyph(button), x + 16.0, cy, 10.0, fg, letter);
+        cv.text_mid(t, Face::Bold, label, x + 34.0, cy, 14.0, fg);
         x - 8.0
     }
 
-    fn hints(&self, cv: Canvas, t: &Text, items: &[(&str, &str)]) {
-        let mut x = 28.0;
-        for (button, label) in items {
-            cv.fill(x, 449.0, 18.0, 18.0, 9.0, SURFACE_HI);
-            let bw = t.measure(Face::Bold, button, 11.0);
-            cv.text(t, Face::Bold, button, x + 9.0 - bw / 2.0, 452.0, 11.0, DIM);
-            cv.text(t, Face::Body, label, x + 24.0, 450.0, 13.0, DIM);
-            x += 24.0 + t.measure(Face::Body, label, 13.0) + 18.0;
+    /// A status line with its dot, or a spinner while `busy`.
+    #[allow(clippy::too_many_arguments)]
+    fn status_line(&self, cv: &Canvas, t: &Text, s: &str, x: f32, cy: f32, width: f32, color: Color, busy: bool) {
+        if busy {
+            icons::spinner(cv, x + 4.0, cy, 5.5, 2.0, self.now, color);
+        } else {
+            cv.circle(x + 4.0, cy, 3.5, color);
+        }
+        let s = t.fit(Face::Body, s, 13.0, width - 16.0);
+        cv.text_mid(t, Face::Body, &s, x + 16.0, cy, 13.0, color);
+    }
+
+    /// The divider and the button hints along the bottom, listed left to right.
+    /// Returns the left edge of the first hint.
+    fn footer(&self, cv: &Canvas, t: &Text, items: &[(&str, &str)]) -> f32 {
+        cv.fill(MARGIN, FOOTER, W - 2.0 * MARGIN, 1.0, 0.0, mix(LINE, BG_BOTTOM, 0.2));
+        let cy = (FOOTER + H) / 2.0;
+        let r = 9.5;
+        let mut x = W - MARGIN - 4.0;
+        for (button, label) in items.iter().rev() {
+            x = cv.text_right(t, Face::Body, label, x, cy, 14.0, TEXT) - 7.0;
+            icons::button(cv, t, self.glyph(button), x - r, cy, r, TEXT, BG_BOTTOM);
+            x -= 2.0 * r + 20.0;
+        }
+        x + 20.0
+    }
+
+    fn draw(&self, cv: Canvas, t: &Text) {
+        unsafe { ffi::ClearBackground(BG_BOTTOM) };
+        cv.gradient_v(0.0, 0.0, W, H, BG_TOP, BG_BOTTOM);
+        // A faint glow behind the content keeps the dark background from looking flat.
+        cv.circle_gradient(W * 0.5, -H * 0.15, H * 0.95, alpha(ACCENT, 0.08), alpha(ACCENT, 0.0));
+        match &self.screen {
+            Screen::Home | Screen::Opening(_) => self.draw_home(&cv, t),
+            Screen::Picker(p) => self.draw_picker(&cv, t, p),
+        }
+        if let Screen::Opening(i) = &self.screen {
+            self.draw_opening(&cv, t, &EMULATORS[*i]);
+        }
+        if let Some((s, _)) = &self.notice {
+            let s = t.fit(Face::Body, s, 14.0, W - 100.0);
+            let w = t.measure(Face::Body, &s, 14.0) + 36.0;
+            let (x, y, h) = ((W - w) / 2.0, FOOTER - 46.0, 34.0);
+            cv.fill(x - 1.0, y + 2.0, w + 2.0, h + 2.0, h / 2.0 + 1.0, alpha(BLACK, 0.35));
+            cv.fill(x, y, w, h, h / 2.0, SURFACE_HI);
+            cv.outline(x, y, w, h, h / 2.0, 1.0, alpha(WHITE, 0.08));
+            cv.text_mid(t, Face::Body, &s, x + 18.0, y + h / 2.0, 14.0, TEXT);
         }
     }
 
-    fn draw_home(&self, cv: Canvas, t: &Text) {
+    fn draw_opening(&self, cv: &Canvas, t: &Text, e: &Emulator) {
+        cv.fill(0.0, 0.0, W, H, 0.0, alpha(BG_BOTTOM, 0.82));
+        let (w, h) = (300.0, 168.0);
+        let (x, y) = ((W - w) / 2.0, (H - h) / 2.0);
+        cv.fill(x, y, w, h, 20.0, SURFACE);
+        cv.outline(x, y, w, h, 20.0, 1.0, alpha(WHITE, 0.06));
+        emulator_tile(cv, e, W / 2.0 - 30.0, y + 24.0, 60.0);
+        let s = fill(self.words.opening, &[("name", e.name)]);
+        cv.text_center(t, Face::Bold, &s, W / 2.0, y + 112.0, 18.0, TEXT);
+        icons::spinner(cv, W / 2.0, y + 142.0, 8.0, 2.5, self.now, ACCENT);
+    }
+
+    fn draw_home(&self, cv: &Canvas, t: &Text) {
         let w = self.words;
         let state = self.center.snapshot();
-        cv.text(t, Face::Title, w.title, 28.0, 18.0, 28.0, TEXT);
+        cv.text(t, Face::Title, w.title, MARGIN + 4.0, 16.0, 26.0, TEXT);
         let subtitle = match &state.error {
             Some(e) => fill(w.cannot_read_apps, &[("e", e)]),
             None => w.subtitle.to_string(),
         };
-        let subtitle = t.fit(Face::Body, &subtitle, 14.0, W - 56.0);
-        cv.text(t, Face::Body, &subtitle, 28.0, 56.0, 14.0, if state.error.is_some() { DANGER } else { DIM });
+        let subtitle = t.fit(Face::Body, &subtitle, 13.0, W - 2.0 * MARGIN - 8.0);
+        let color = if state.error.is_some() { DANGER } else { DIM };
+        cv.text_mid(t, Face::Body, &subtitle, MARGIN + 4.0, 60.0, 13.0, color);
 
+        let (left, right) = (MARGIN + 94.0, W - MARGIN - 18.0);
         let progress = self.center.progress.fraction();
         for (i, (e, entry)) in EMULATORS.iter().zip(&state.entries).enumerate() {
-            let y = 90.0 + i as f32 * 114.0;
+            let y = CARD_TOP + i as f32 * (CARD_H + CARD_GAP);
             let focused = self.focus == i;
-            cv.fill(20.0, y, W - 40.0, 104.0, 14.0, if focused { SURFACE_HI } else { SURFACE });
-            if focused {
-                cv.outline(20.0, y, W - 40.0, 104.0, 14.0, 2.0, ACCENT);
-            }
-            let [r, g, b] = e.color;
-            cv.fill(36.0, y + 18.0, 52.0, 52.0, 12.0, Color { r, g, b, a: 255 });
-            let initial = &e.name[..1];
-            let iw = t.measure(Face::Title, initial, 28.0);
-            cv.text(t, Face::Title, initial, 62.0 - iw / 2.0, y + 26.0, 28.0, TEXT);
-            cv.text(t, Face::Bold, e.name, 104.0, y + 14.0, 21.0, TEXT);
-            let systems = if std::ptr::eq(w, &i18n::ZH) { e.systems_zh } else { e.systems };
-            let systems = t.fit(Face::Body, systems, 13.0, W - 150.0);
-            cv.text(t, Face::Body, &systems, 104.0, y + 42.0, 13.0, DIM);
-            let (status, color) = self.status(entry, progress);
-            let status = t.fit(Face::Body, &status, 14.0, if focused { 250.0 } else { W - 150.0 });
-            cv.text(t, Face::Body, &status, 104.0, y + 70.0, 14.0, color);
-            if matches!(entry.task, Task::Downloading | Task::Verifying) {
-                cv.fill(104.0, y + 92.0, W - 148.0, 4.0, 2.0, LINE);
-                cv.fill(104.0, y + 92.0, (W - 148.0) * progress, 4.0, 2.0, ACCENT);
-            }
+            self.card(cv, y, focused);
+            emulator_tile(cv, e, MARGIN + 18.0, y + 19.0, 60.0);
+
+            let mut name_right = right;
             if focused && !entry.working() {
-                let mut x = W - 36.0;
                 let offer = entry.offer();
-                let update = entry.installed.is_some() && offer.is_some();
-                if update {
-                    x = self.chip(cv, t, x, y + 66.0, "X", w.update, false);
-                }
                 let primary = if entry.installed.is_some() {
                     Some(w.open)
                 } else if offer.is_some() {
@@ -450,37 +555,52 @@ impl App {
                 } else {
                     None
                 };
+                let mut x = right;
                 if let Some(label) = primary {
-                    self.chip(cv, t, x, y + 66.0, "A", label, true);
+                    x = self.chip(cv, t, x, y + 30.0, "A", label, true);
                 }
+                if entry.installed.is_some() && offer.is_some() {
+                    x = self.chip(cv, t, x, y + 30.0, "X", w.update, false);
+                }
+                name_right = x;
+            }
+            let name = t.fit(Face::Bold, e.name, 19.0, name_right - 8.0 - left);
+            cv.text_mid(t, Face::Bold, &name, left, y + 28.0, 19.0, TEXT);
+            let systems = if std::ptr::eq(w, &i18n::ZH) { e.systems_zh } else { e.systems };
+            let systems = t.fit(Face::Body, systems, 13.0, right - left);
+            cv.text_mid(t, Face::Body, &systems, left, y + 54.0, 13.0, DIM);
+            let (status, color) = self.status(entry, progress);
+            self.status_line(cv, t, &status, left, y + 76.0, right - left, color, entry.working());
+            if matches!(entry.task, Task::Downloading | Task::Verifying) {
+                cv.fill(left, y + 88.0, right - left, 4.0, 2.0, alpha(LINE, 0.9));
+                cv.fill(left, y + 88.0, ((right - left) * progress).max(4.0), 4.0, 2.0, ACCENT);
             }
         }
 
-        let y = 318.0;
+        let y = CARD_TOP + GAMES_ROW as f32 * (CARD_H + CARD_GAP);
         let focused = self.focus == GAMES_ROW;
-        cv.fill(20.0, y, W - 40.0, 92.0, 14.0, if focused { SURFACE_HI } else { SURFACE });
+        self.card(cv, y, focused);
+        icons::tile(cv, MARGIN + 18.0, y + 19.0, 60.0, 16.0, GAMES_TILE);
+        icons::folder(cv, MARGIN + 48.0, y + 50.0, 40.0, WHITE, mix(WHITE, GAMES_TILE, 0.4));
+        let mut name_right = right;
         if focused {
-            cv.outline(20.0, y, W - 40.0, 92.0, 14.0, 2.0, ACCENT);
+            let mut x = self.chip(cv, t, right, y + 30.0, "A", w.change_folder, true);
+            if self.settings.folder.is_some() && self.tf2.is_some() {
+                x = self.chip(cv, t, x, y + 30.0, "X", w.use_tf2, false);
+            }
+            name_right = x;
         }
-        cv.text(t, Face::Bold, w.games, 36.0, y + 12.0, 17.0, TEXT);
-        let folder = self.games_folder();
+        let name = t.fit(Face::Bold, w.games, 19.0, name_right - 8.0 - left);
+        cv.text_mid(t, Face::Bold, &name, left, y + 28.0, 19.0, TEXT);
+        let note = t.fit(Face::Body, w.open_note, 13.0, right - left);
+        cv.text_mid(t, Face::Body, &note, left, y + 54.0, 13.0, DIM);
         let (line, color) = match (&self.settings.folder, &self.tf2) {
             (Some(chosen), _) if chosen.is_dir() => (chosen.display().to_string(), TEXT),
             (_, Some(tf2)) => (fill(w.tf2_found, &[("p", &tf2.display().to_string())]), SUCCESS),
             _ => (w.no_tf2.to_string(), WARM),
         };
-        let line = t.fit_start(Face::Body, &line, 14.0, W - 76.0);
-        cv.text(t, Face::Body, &line, 36.0, y + 38.0, 14.0, color);
-        let note = t.fit(Face::Body, w.open_note, 12.0, if focused { 300.0 } else { W - 76.0 });
-        cv.text(t, Face::Body, &note, 36.0, y + 64.0, 12.0, FAINT);
-        let _ = folder;
-        if focused {
-            let mut x = W - 36.0;
-            if self.settings.folder.is_some() && self.tf2.is_some() {
-                x = self.chip(cv, t, x, y + 58.0, "X", w.use_tf2, false);
-            }
-            self.chip(cv, t, x, y + 58.0, "A", w.change_folder, true);
-        }
+        let line = t.fit_start(Face::Body, &line, 13.0, right - left - 16.0);
+        self.status_line(cv, t, &line, left, y + 76.0, right - left, color, false);
 
         let entry = state.entries.get(self.focus);
         let primary = match entry {
@@ -488,61 +608,170 @@ impl App {
             Some(_) => w.install,
             None => w.choose,
         };
-        self.hints(cv, t, &[("A", primary), ("Y", w.refresh), ("B", w.quit)]);
+        let hints_left = self.footer(cv, t, &[("B", w.quit), ("Y", w.refresh), ("A", primary)]);
         if state.busy
             && entry.is_some_and(|e| !e.working())
             && matches!(entry.map(|e| &e.store), Some(StoreState::Checking))
         {
-            let s = w.checking;
-            let sw = t.measure(Face::Body, s, 13.0);
-            cv.text(t, Face::Body, s, W - 28.0 - sw, 450.0, 13.0, FAINT);
+            let cy = (FOOTER + H) / 2.0;
+            icons::spinner(cv, MARGIN + 10.0, cy, 6.0, 2.0, self.now, FAINT);
+            let s = t.fit(Face::Body, w.checking, 13.0, hints_left - MARGIN - 40.0);
+            cv.text_mid(t, Face::Body, &s, MARGIN + 24.0, cy, 13.0, FAINT);
         }
     }
 
-    fn draw_picker(&self, cv: Canvas, t: &Text, p: &Picker) {
-        let w = self.words;
-        cv.text(t, Face::Title, w.picker_title, 28.0, 18.0, 26.0, TEXT);
-        let here = match &p.dir {
-            None => w.places.to_string(),
-            Some(d) => d.display().to_string(),
-        };
-        let here = t.fit_start(Face::Body, &here, 14.0, W - 56.0);
-        cv.text(t, Face::Body, &here, 28.0, 54.0, 14.0, DIM);
+    /// Where the picker is, as the place's name and the folders below it.
+    fn crumbs(&self, dir: &Path) -> (Option<PlaceKind>, Vec<String>) {
+        let place = games::places(self.tf2.as_deref())
+            .into_iter()
+            .filter(|(_, path)| dir.starts_with(path))
+            .max_by_key(|(_, path)| path.components().count());
+        match place {
+            Some((kind, path)) => {
+                let mut parts = vec![self.place_name(&kind).to_string()];
+                if let Ok(rest) = dir.strip_prefix(&path) {
+                    parts.extend(rest.iter().map(|c| c.to_string_lossy().into_owned()));
+                }
+                (Some(kind), parts)
+            }
+            None => (None, vec![dir.display().to_string()]),
+        }
+    }
 
-        const TOP: f32 = 84.0;
-        const ROW: f32 = 34.0;
-        const ROWS: usize = 9;
-        let first = p.focus.saturating_sub(ROWS - 1).min(p.rows.len().saturating_sub(ROWS));
-        if p.rows.is_empty() || (p.rows.len() == 1 && p.dir.is_some()) {
-            cv.text(t, Face::Body, w.no_folders, 44.0, TOP + ROW + 8.0, 14.0, FAINT);
+    fn draw_crumbs(&self, cv: &Canvas, t: &Text, p: &Picker, cy: f32) {
+        let mut x = MARGIN + 4.0;
+        let (kind, mut parts) = match &p.dir {
+            None => (None, vec![self.words.places.to_string()]),
+            Some(d) => self.crumbs(d),
+        };
+        if let Some(kind) = &kind {
+            let color = place_color(kind);
+            cv.fill(x, cy - 10.0, 20.0, 20.0, 6.0, color);
+            place_icon(cv, kind, x + 10.0, cy, 14.0, WHITE, color);
+            x += 28.0;
         }
-        for (n, row) in p.rows.iter().enumerate().skip(first).take(ROWS) {
-            let y = TOP + (n - first) as f32 * ROW;
-            let focused = n == p.focus;
-            if focused {
-                cv.fill(20.0, y, W - 40.0, ROW - 4.0, 10.0, SURFACE_HI);
-                cv.outline(20.0, y, W - 40.0, ROW - 4.0, 10.0, 2.0, ACCENT);
+        let sep = 16.0;
+        let room = W - MARGIN - 4.0 - x;
+        let width = |parts: &[String]| -> f32 {
+            parts.iter().map(|s| t.measure(Face::Bold, s, 14.0)).sum::<f32>() + sep * (parts.len() as f32 - 1.0)
+        };
+        // Too long: keep the place and the last folders, with an ellipsis between.
+        while parts.len() > 2 && width(&parts) > room {
+            if parts[1] == "…" {
+                if parts.len() == 3 {
+                    break;
+                }
+                parts.remove(2);
+            } else {
+                parts[1] = "…".into();
             }
-            let (label, detail) = match row {
-                Row::Place(kind, path) => (self.place_name(kind).to_string(), path.display().to_string()),
-                Row::Up => (format!("↑  {}", w.back), String::new()),
-                Row::Folder(name) => (name.clone(), String::new()),
-            };
-            let face = if matches!(row, Row::Place(..)) { Face::Bold } else { Face::Body };
-            let label = t.fit(face, &label, 15.0, if detail.is_empty() { W - 90.0 } else { 220.0 });
-            cv.text(t, face, &label, 40.0, y + 7.0, 15.0, if matches!(row, Row::Up) { DIM } else { TEXT });
-            if !detail.is_empty() {
-                let detail = t.fit_start(Face::Body, &detail, 13.0, W - 330.0);
-                let dw = t.measure(Face::Body, &detail, 13.0);
-                cv.text(t, Face::Body, &detail, W - 40.0 - dw, y + 9.0, 13.0, DIM);
+        }
+        let last = parts.len() - 1;
+        for (i, part) in parts.iter().enumerate() {
+            let s = t.fit_start(Face::Bold, part, 14.0, (W - MARGIN - 4.0 - x).max(20.0));
+            let color = if i == last { TEXT } else { DIM };
+            x += cv.text_mid(t, Face::Bold, &s, x, cy, 14.0, color);
+            if i < last {
+                icons::chevron(cv, x + sep / 2.0, cy, 11.0, FAINT);
+                x += sep;
             }
         }
-        if p.dir.is_some() {
-            let s = fill(w.files_here, &[("n", &p.files.to_string())]);
-            cv.text(t, Face::Body, &s, 28.0, 400.0, 13.0, FAINT);
+    }
+
+    fn draw_picker(&self, cv: &Canvas, t: &Text, p: &Picker) {
+        let w = self.words;
+        cv.text(t, Face::Title, w.picker_title, MARGIN + 4.0, 16.0, 24.0, TEXT);
+        self.draw_crumbs(cv, t, p, 58.0);
+
+        let current = self.games_folder();
+        let end = (p.first + ROWS).min(p.rows.len());
+        let order = (p.first..end).filter(|&n| n != p.focus).chain((p.first..end).filter(|&n| n == p.focus));
+        for n in order {
+            self.draw_row(cv, t, p, n, LIST_TOP + (n - p.first) as f32 * ROW_H, n + 1 == end, &current);
         }
+        if p.dir.is_some() && p.rows.len() == 1 {
+            let cy = LIST_TOP + ROW_H + 110.0;
+            icons::folder(cv, W / 2.0, cy - 30.0, 64.0, alpha(FAINT, 0.5), alpha(FAINT, 0.3));
+            cv.text_center(t, Face::Body, w.no_folders, W / 2.0, cy + 18.0, 15.0, DIM);
+        }
+        if p.rows.len() > ROWS {
+            let (x, top, h) = (W - 12.0, LIST_TOP + 4.0, ROWS as f32 * ROW_H - 8.0);
+            cv.fill(x, top, 3.0, h, 1.5, alpha(LINE, 0.7));
+            let thumb = (h * ROWS as f32 / p.rows.len() as f32).max(18.0);
+            let at = (h - thumb) * p.first as f32 / (p.rows.len() - ROWS) as f32;
+            cv.fill(x, top + at, 3.0, thumb, 1.5, alpha(DIM, 0.8));
+        }
+
         let open = if p.dir.is_none() { w.choose } else { w.open };
-        self.hints(cv, t, &[("A", open), ("X", w.use_this), ("B", w.back)]);
+        let hints_left = self.footer(cv, t, &[("B", w.back), ("X", w.use_this), ("A", open)]);
+        if p.dir.is_some() {
+            let s = count(p.here.files, w.one_file_here, w.files_here);
+            let s = t.fit(Face::Body, &s, 13.0, hints_left - MARGIN - 24.0);
+            cv.text_mid(t, Face::Body, &s, MARGIN + 4.0, (FOOTER + H) / 2.0, 13.0, FAINT);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_row(&self, cv: &Canvas, t: &Text, p: &Picker, n: usize, y: f32, last: bool, current: &Path) {
+        let w = self.words;
+        let row = &p.rows[n];
+        let focused = n == p.focus;
+        let (x, width) = (MARGIN, W - 2.0 * MARGIN);
+        if focused {
+            cv.fill(x, y + 3.0, width, ROW_H - 6.0, 12.0, SURFACE_HI);
+            self.focus_ring(cv, x, y + 3.0, width, ROW_H - 6.0, 12.0);
+        } else if !last {
+            cv.fill(x + 52.0, y + ROW_H - 0.5, width - 66.0, 1.0, 0.0, alpha(LINE, 0.55));
+        }
+        let cy = y + ROW_H / 2.0;
+        let icon_x = x + 26.0;
+        match row {
+            Row::Place(kind, _) => {
+                let color = place_color(kind);
+                icons::tile(cv, icon_x - 14.0, cy - 14.0, 28.0, 8.0, color);
+                place_icon(cv, kind, icon_x, cy, 19.0, WHITE, color);
+            }
+            Row::Up => {
+                cv.circle(icon_x, cy, 13.0, alpha(TEXT, 0.08));
+                icons::arrow_up(cv, icon_x, cy, 15.0, DIM);
+            }
+            Row::Folder(_) => icons::folder(cv, icon_x, cy, 28.0, FOLDER, icons::folder_back(FOLDER)),
+        }
+
+        let label_x = x + 52.0;
+        let mut right = x + width - 14.0;
+        if focused {
+            icons::chevron(cv, right - 4.0, cy, 15.0, DIM);
+            right -= 22.0;
+        }
+        if p.path(row).as_deref() == Some(current) {
+            let bw = t.measure(Face::Bold, w.current, 12.0) + 30.0;
+            cv.fill(right - bw, cy - 11.0, bw, 22.0, 11.0, alpha(SUCCESS, 0.14));
+            icons::check(cv, right - bw + 12.0, cy, 11.0, SUCCESS);
+            cv.text_mid(t, Face::Bold, w.current, right - bw + 21.0, cy, 12.0, SUCCESS);
+            right -= bw + 12.0;
+        }
+        let (label, face, color) = match row {
+            Row::Place(kind, _) => (self.place_name(kind).to_string(), Face::Bold, TEXT),
+            Row::Up => (w.up.to_string(), Face::Body, DIM),
+            Row::Folder(name) => (name.clone(), Face::Body, TEXT),
+        };
+        let label_w = t.measure(face, &label, 15.0).min(right - label_x - 60.0);
+        let detail = match (row, &p.dir) {
+            (Row::Place(_, path), _) => path.display().to_string(),
+            (Row::Up, Some(d)) => match self.up_from(d) {
+                Some(parent) => self.crumbs(&parent).1.last().cloned().unwrap_or_default(),
+                None => w.places.to_string(),
+            },
+            (Row::Folder(_), _) => p.contents[n].map(|c| self.describe(c)).unwrap_or_default(),
+            _ => String::new(),
+        };
+        if !detail.is_empty() {
+            let detail = t.fit_start(Face::Body, &detail, 13.0, (right - label_x - label_w - 24.0).max(40.0));
+            right = cv.text_right(t, Face::Body, &detail, right, cy, 13.0, if focused { DIM } else { FAINT }) - 16.0;
+        }
+        let label = t.fit(face, &label, 15.0, right - label_x);
+        cv.text_mid(t, face, &label, label_x, cy, 15.0, color);
     }
 }
 
@@ -581,7 +810,7 @@ fn main() {
     }
     let fonts =
         std::env::var_os("EMULATION_CENTER_ASSETS").map(PathBuf::from).unwrap_or_else(|| "assets".into()).join("fonts");
-    let mut text = Text::load(&fonts, Canvas::now().scale, &i18n::all_text());
+    let mut text = Text::load(&fonts, Canvas::now().scale(), &i18n::all_text());
     let mut app = App {
         words: i18n::words(&lang),
         center: Center::start(store::api(), save.join("downloads")),
@@ -592,11 +821,20 @@ fn main() {
         focus: std::env::var("EMULATION_CENTER_FOCUS").ok().and_then(|f| f.parse().ok()).unwrap_or(0).min(GAMES_ROW),
         screen: Screen::Home,
         notice: None,
+        swap_ab: std::env::var("GIZLET_SWAP_AB").is_ok_and(|v| v == "1"),
+        now: 0.0,
+        moved: -10.0,
     };
     match std::env::var("EMULATION_CENTER_SCENE").as_deref() {
-        Ok("picker") => app.screen = Screen::Picker(app.open_picker(None)),
+        Ok("picker") => app.screen = Screen::Picker(app.open_picker(None, None)),
         Ok(scene) if scene.starts_with("picker:") => {
-            app.screen = Screen::Picker(app.open_picker(Some(PathBuf::from(&scene["picker:".len()..]))));
+            let dir = PathBuf::from(&scene["picker:".len()..]);
+            let mut picker = app.open_picker(Some(dir), None);
+            if let Some(focus) = std::env::var("EMULATION_CENTER_FOCUS").ok().and_then(|f| f.parse().ok()) {
+                picker.focus = usize::min(focus, picker.rows.len().saturating_sub(1));
+                picker.reveal();
+            }
+            app.screen = Screen::Picker(picker);
         }
         _ => {}
     }
